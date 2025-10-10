@@ -17,7 +17,7 @@
             <meta name="viewport" content="width=device-width,
                 initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
             <style>
-                #map_d3b8667dd7b98490ebbf6e5d540d6834 {
+                #map_4591dcd7d24ee76cdb67f463d16c9d07 {
                     position: relative;
                     width: 100.0%;
                     height: 100.0%;
@@ -56,7 +56,107 @@
 <body>
     
     
-            <div class="folium-map" id="map_d3b8667dd7b98490ebbf6e5d540d6834" ></div>
+        <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+        <script>
+        (function() {
+            console.log('[INIT] Starting initialization...');
+            var bridgeObj = null;
+
+            // Initialize QWebChannel immediately
+            function initBridge() {
+                if (typeof qt === 'undefined' || !qt.webChannelTransport) {
+                    console.error('[ERROR] Qt WebChannel not available!');
+                    return false;
+                }
+
+                console.log('[INIT] Creating QWebChannel...');
+                new QWebChannel(qt.webChannelTransport, function(channel) {
+                    bridgeObj = channel.objects.bridge;
+                    console.log('[SUCCESS] Bridge connected!', bridgeObj);
+
+                    // Verify bridge has receiveRegion method
+                    if (bridgeObj && typeof bridgeObj.receiveRegion === 'function') {
+                        console.log('[SUCCESS] bridge.receiveRegion is available');
+                    } else {
+                        console.error('[ERROR] bridge.receiveRegion not found!');
+                    }
+
+                    // Once bridge is ready, attach map listener
+                    attachMapListener();
+                });
+                return true;
+            }
+
+            // Attach listener to map
+            function attachMapListener() {
+                console.log('[INIT] Waiting for map object...');
+
+                var attempts = 0;
+                var maxAttempts = 100;
+
+                var checkMap = setInterval(function() {
+                    attempts++;
+
+                    if (typeof map !== 'undefined' && map) {
+                        clearInterval(checkMap);
+                        console.log('[SUCCESS] Map object found!');
+
+                        // Attach draw listener
+                        map.on('draw:created', function(e) {
+                            console.log('[EVENT] Rectangle drawn!');
+
+                            try {
+                                var layer = e.layer;
+                                var bounds = layer.getBounds();
+
+                                var data = {
+                                    north: bounds.getNorth(),
+                                    south: bounds.getSouth(),
+                                    east: bounds.getEast(),
+                                    west: bounds.getWest()
+                                };
+
+                                console.log('[DATA] Bounds:', JSON.stringify(data, null, 2));
+
+                                // Send to Python
+                                if (bridgeObj && typeof bridgeObj.receiveRegion === 'function') {
+                                    console.log('[SEND] Calling bridge.receiveRegion...');
+                                    bridgeObj.receiveRegion(JSON.stringify(data));
+                                    console.log('[SEND] Data sent successfully!');
+                                } else {
+                                    console.error('[ERROR] Bridge not ready or method missing!');
+                                    alert('Connection error! Please restart the application.');
+                                }
+                            } catch (error) {
+                                console.error('[ERROR] Exception:', error);
+                                alert('Error processing selection: ' + error.message);
+                            }
+                        });
+
+                        console.log('[SUCCESS] Draw listener attached!');
+
+                    } else if (attempts >= maxAttempts) {
+                        clearInterval(checkMap);
+                        console.error('[ERROR] Map object not found after ' + maxAttempts + ' attempts');
+                    }
+                }, 50);
+            }
+
+            // Start initialization when DOM is ready
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', function() {
+                    console.log('[INIT] DOM ready');
+                    initBridge();
+                });
+            } else {
+                console.log('[INIT] DOM already ready');
+                initBridge();
+            }
+        })();
+        </script>
+        
+    
+            <div class="folium-map" id="map_4591dcd7d24ee76cdb67f463d16c9d07" ></div>
         
     
             
@@ -84,25 +184,26 @@
 <script>
     
     
-            var map_d3b8667dd7b98490ebbf6e5d540d6834 = L.map(
-                "map_d3b8667dd7b98490ebbf6e5d540d6834",
+            var map_4591dcd7d24ee76cdb67f463d16c9d07 = L.map(
+                "map_4591dcd7d24ee76cdb67f463d16c9d07",
                 {
-                    center: [43.7323492, 7.4276832],
+                    center: [52.5219814, 13.4136358],
                     crs: L.CRS.EPSG3857,
                     ...{
-  "zoom": 14,
+  "zoom": 13,
   "zoomControl": true,
   "preferCanvas": false,
 }
 
                 }
             );
+            L.control.scale().addTo(map_4591dcd7d24ee76cdb67f463d16c9d07);
 
             
 
         
     
-            var tile_layer_3b5588c32a1c956ab90cff5d9e284961 = L.tileLayer(
+            var tile_layer_a10ede2a7cc7e11b3fef0fa3570d0d7a = L.tileLayer(
                 "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
                 {
   "minZoom": 0,
@@ -119,25 +220,25 @@
             );
         
     
-            tile_layer_3b5588c32a1c956ab90cff5d9e284961.addTo(map_d3b8667dd7b98490ebbf6e5d540d6834);
+            tile_layer_a10ede2a7cc7e11b3fef0fa3570d0d7a.addTo(map_4591dcd7d24ee76cdb67f463d16c9d07);
         
     
             var options = {
               position: "topleft",
-              draw: {"circle": false, "polygon": false},
+              draw: {"circle": false, "circlemarker": false, "marker": false, "polygon": false, "polyline": false, "rectangle": {"shapeOptions": {"color": "#2196F3", "fillOpacity": 0.2, "weight": 3}}},
               edit: {},
             }
                 // FeatureGroup is to store editable layers.
-                var drawnItems_draw_control_79812c68a5fa884228e2b07644633a56 =
+                var drawnItems_draw_control_3ce87a152f55941c7157f2207be1bb62 =
                     new L.featureGroup().addTo(
-                        map_d3b8667dd7b98490ebbf6e5d540d6834
+                        map_4591dcd7d24ee76cdb67f463d16c9d07
                     );
 
-            options.edit.featureGroup = drawnItems_draw_control_79812c68a5fa884228e2b07644633a56;
-            var draw_control_79812c68a5fa884228e2b07644633a56 = new L.Control.Draw(
+            options.edit.featureGroup = drawnItems_draw_control_3ce87a152f55941c7157f2207be1bb62;
+            var draw_control_3ce87a152f55941c7157f2207be1bb62 = new L.Control.Draw(
                 options
-            ).addTo( map_d3b8667dd7b98490ebbf6e5d540d6834 );
-            map_d3b8667dd7b98490ebbf6e5d540d6834.on(L.Draw.Event.CREATED, function(e) {
+            ).addTo( map_4591dcd7d24ee76cdb67f463d16c9d07 );
+            map_4591dcd7d24ee76cdb67f463d16c9d07.on(L.Draw.Event.CREATED, function(e) {
                 var layer = e.layer,
                     type = e.layerType;
                 var coords = JSON.stringify(layer.toGeoJSON());
@@ -145,15 +246,15 @@
                     alert(coords);
                     console.log(coords);
                 });
-                drawnItems_draw_control_79812c68a5fa884228e2b07644633a56.addLayer(layer);
+                drawnItems_draw_control_3ce87a152f55941c7157f2207be1bb62.addLayer(layer);
             });
-            map_d3b8667dd7b98490ebbf6e5d540d6834.on('draw:created', function(e) {
-                drawnItems_draw_control_79812c68a5fa884228e2b07644633a56.addLayer(e.layer);
+            map_4591dcd7d24ee76cdb67f463d16c9d07.on('draw:created', function(e) {
+                drawnItems_draw_control_3ce87a152f55941c7157f2207be1bb62.addLayer(e.layer);
             });
 
             
             document.getElementById('export').onclick = function(e) {
-                var data = drawnItems_draw_control_79812c68a5fa884228e2b07644633a56.toGeoJSON();
+                var data = drawnItems_draw_control_3ce87a152f55941c7157f2207be1bb62.toGeoJSON();
                 var convertedData = 'text/json;charset=utf-8,'
                     + encodeURIComponent(JSON.stringify(data));
                 document.getElementById('export').setAttribute(
@@ -166,22 +267,22 @@
             
         
     
-            var layer_control_c787e84e86533bb2d8ea3b2aedc9fe4d_layers = {
+            var layer_control_1d4c07eb4cafbcfecc3055e18089679f_layers = {
                 base_layers : {
-                    "openstreetmap" : tile_layer_3b5588c32a1c956ab90cff5d9e284961,
+                    "openstreetmap" : tile_layer_a10ede2a7cc7e11b3fef0fa3570d0d7a,
                 },
                 overlays :  {
                 },
             };
-            let layer_control_c787e84e86533bb2d8ea3b2aedc9fe4d = L.control.layers(
-                layer_control_c787e84e86533bb2d8ea3b2aedc9fe4d_layers.base_layers,
-                layer_control_c787e84e86533bb2d8ea3b2aedc9fe4d_layers.overlays,
+            let layer_control_1d4c07eb4cafbcfecc3055e18089679f = L.control.layers(
+                layer_control_1d4c07eb4cafbcfecc3055e18089679f_layers.base_layers,
+                layer_control_1d4c07eb4cafbcfecc3055e18089679f_layers.overlays,
                 {
   "position": "topright",
   "collapsed": true,
   "autoZIndex": true,
 }
-            ).addTo(map_d3b8667dd7b98490ebbf6e5d540d6834);
+            ).addTo(map_4591dcd7d24ee76cdb67f463d16c9d07);
 
         
 </script>
