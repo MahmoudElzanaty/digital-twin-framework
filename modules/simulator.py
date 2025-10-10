@@ -1,5 +1,6 @@
 import os
 import traci
+from modules.logger import TrafficLogger
 
 def create_config(net_file, route_file, cfg_path):
     net_rel = os.path.relpath(net_file, start=os.path.dirname(cfg_path))
@@ -24,10 +25,18 @@ def run_simulation(cfg_file, gui=True):
     sumo_binary = "sumo-gui" if gui else "sumo"
     traci.start([sumo_binary, "-c", cfg_file])
     step = 0
-    while traci.simulation.getMinExpectedNumber() > 0:
-        traci.simulationStep()
-        step += 1
-        if step % 100 == 0:
-            print(f"Step {step}...")
-    traci.close()
-    print("[SUCCESS] Simulation completed.")
+
+    logger = TrafficLogger(log_dir="data/logs", interval=10)
+
+    print("[SIM] Simulation started ...")
+    try:
+        while traci.simulation.getMinExpectedNumber() > 0:
+            traci.simulationStep()
+            step += 1
+            logger.log_step(step)
+            if step % 100 == 0:
+                print(f"[SIM] Step {step}")
+    finally:
+        logger.close()
+        traci.close()
+        print("[SIM] Simulation ended.")
