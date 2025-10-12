@@ -596,7 +596,7 @@ class MainWindow(QWidget):
             self.init_map([30.0444, 31.2357], 12)
 
     def on_run(self):
-        """Run the simulation"""
+        """Run the simulation with Digital Twin integration"""
         print(f"[DEBUG] on_run called. self.selected_bbox = {self.selected_bbox}")
 
         if not self.selected_bbox:
@@ -609,7 +609,7 @@ class MainWindow(QWidget):
         intensity = self.intensity.currentText()
 
         self.log("=" * 60, "INFO")
-        self.log(f"Starting simulation for: {location}", "INFO")
+        self.log(f"Starting DIGITAL TWIN simulation for: {location}", "INFO")
         self.log(f"Duration: {duration}s | Traffic: {intensity}", "INFO")
         self.log("=" * 60, "INFO")
 
@@ -649,18 +649,42 @@ class MainWindow(QWidget):
             )
             self.log(f"Config created: {os.path.basename(cfg_path)}", "SUCCESS")
 
-            # Run simulation
-            self.log("Launching SUMO simulation GUI...", "INFO")
-            run_simulation(cfg_path, gui=True)
+            # DIGITAL TWIN: Generate unique scenario ID
+            from datetime import datetime
+            scenario_id = f"{location.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+            self.log("=" * 60, "INFO")
+            self.log("🔬 DIGITAL TWIN MODE ENABLED", "INFO")
+            self.log(f"Scenario ID: {scenario_id}", "INFO")
+            self.log("Simulation will track routes and compare with real data", "INFO")
+            self.log("=" * 60, "INFO")
+
+            # Run simulation with Digital Twin features
+            self.log("Launching SUMO simulation...", "INFO")
+            run_simulation(
+                cfg_path,
+                gui=True,
+                scenario_id=scenario_id,
+                enable_digital_twin=True  # Enable Digital Twin monitoring
+            )
 
             self.log("=" * 60, "SUCCESS")
             self.log("✅ Simulation completed successfully!", "SUCCESS")
             self.log("=" * 60, "SUCCESS")
 
+            # Show digital twin results
+            self.log("", "INFO")
+            self.log("📊 DIGITAL TWIN RESULTS:", "INFO")
+            self.log(f"View detailed comparison using:", "INFO")
+            self.log(f"  python test_digital_twin_comparison.py", "INFO")
+            self.log(f"Or check the database for scenario: {scenario_id}", "INFO")
+
         except Exception as e:
             self.log("=" * 60, "ERROR")
             self.log(f"❌ Simulation failed: {str(e)}", "ERROR")
             self.log("=" * 60, "ERROR")
+            import traceback
+            traceback.print_exc()
 
         finally:
             # Re-enable UI

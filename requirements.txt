@@ -1,0 +1,40 @@
+# Core GUI and Mapping
+PyQt6==6.6.1
+PyQt6-WebEngine==6.6.0
+folium==0.15.1
+geopy==2.4.1
+
+# Network and Simulation
+osmnx==1.9.1
+networkx==3.2.1
+geopandas==0.14.2
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.3
+
+# Machine Learning (for adaptive features)
+scikit-learn==1.4.0
+tensorflow==2.15.0
+# OR pytorch if you prefer: torch==2.1.2
+
+# Visualization
+matplotlib==3.8.2
+seaborn==0.13.1
+plotly==5.18.0
+
+# Database for persistence
+sqlalchemy==2.0.25
+sqlite3  # built-in
+
+# API Integration (optional - for real data)
+requests==2.31.0
+
+# Utilities
+pyyaml==6.0.1
+python-dotenv==1.0.0
+tqdm==4.66.1
+
+# Testing
+pytest==7.4.4
+pytest-qt==4.3.1
