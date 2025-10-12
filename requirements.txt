@@ -28,7 +28,7 @@ sqlalchemy==2.0.25
 sqlite3  # built-in
 
 # API Integration (optional - for real data)
-requests==2.31.0
+requests==2.32.4
 
 # Utilities
 pyyaml==6.0.1
