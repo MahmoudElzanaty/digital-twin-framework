@@ -17,7 +17,7 @@
             <meta name="viewport" content="width=device-width,
                 initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
             <style>
-                #map_439753fc6d15b8b90191e1e7fdd92d1c {
+                #map_e173de902f44bedb7028aa5a6b444cfd {
                     position: relative;
                     width: 100.0%;
                     height: 100.0%;
@@ -74,20 +74,17 @@
                     bridgeObj = channel.objects.bridge;
                     console.log('[SUCCESS] Bridge connected!', bridgeObj);
 
-                    // Verify bridge has receiveRegion method
                     if (bridgeObj && typeof bridgeObj.receiveRegion === 'function') {
                         console.log('[SUCCESS] bridge.receiveRegion is available');
                     } else {
                         console.error('[ERROR] bridge.receiveRegion not found!');
                     }
 
-                    // Once bridge is ready, attach map listener
                     attachMapListener();
                 });
                 return true;
             }
 
-            // Attach listener to map
             function attachMapListener() {
                 console.log('[INIT] Waiting for map object...');
 
@@ -101,7 +98,6 @@
                         clearInterval(checkMap);
                         console.log('[SUCCESS] Map object found!');
 
-                        // Attach draw listener
                         map.on('draw:created', function(e) {
                             console.log('[EVENT] Rectangle drawn!');
 
@@ -118,7 +114,6 @@
 
                                 console.log('[DATA] Bounds:', JSON.stringify(data, null, 2));
 
-                                // Send to Python
                                 if (bridgeObj && typeof bridgeObj.receiveRegion === 'function') {
                                     console.log('[SEND] Calling bridge.receiveRegion...');
                                     bridgeObj.receiveRegion(JSON.stringify(data));
@@ -142,7 +137,6 @@
                 }, 50);
             }
 
-            // Start initialization when DOM is ready
             if (document.readyState === 'loading') {
                 document.addEventListener('DOMContentLoaded', function() {
                     console.log('[INIT] DOM ready');
@@ -156,7 +150,7 @@
         </script>
         
     
-            <div class="folium-map" id="map_439753fc6d15b8b90191e1e7fdd92d1c" ></div>
+            <div class="folium-map" id="map_e173de902f44bedb7028aa5a6b444cfd" ></div>
         
     
             
@@ -184,26 +178,26 @@
 <script>
     
     
-            var map_439753fc6d15b8b90191e1e7fdd92d1c = L.map(
-                "map_439753fc6d15b8b90191e1e7fdd92d1c",
+            var map_e173de902f44bedb7028aa5a6b444cfd = L.map(
+                "map_e173de902f44bedb7028aa5a6b444cfd",
                 {
-                    center: [30.0443807, 31.2357465],
+                    center: [30.0444, 31.2357],
                     crs: L.CRS.EPSG3857,
                     ...{
-  "zoom": 13,
+  "zoom": 12,
   "zoomControl": true,
   "preferCanvas": false,
 }
 
                 }
             );
-            L.control.scale().addTo(map_439753fc6d15b8b90191e1e7fdd92d1c);
+            L.control.scale().addTo(map_e173de902f44bedb7028aa5a6b444cfd);
 
             
 
         
     
-            var tile_layer_cec501a45dd71270cfd92521d9b4cf8e = L.tileLayer(
+            var tile_layer_2a56fefa36be2b69e3388d91def5efac = L.tileLayer(
                 "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
                 {
   "minZoom": 0,
@@ -220,7 +214,7 @@
             );
         
     
-            tile_layer_cec501a45dd71270cfd92521d9b4cf8e.addTo(map_439753fc6d15b8b90191e1e7fdd92d1c);
+            tile_layer_2a56fefa36be2b69e3388d91def5efac.addTo(map_e173de902f44bedb7028aa5a6b444cfd);
         
     
             var options = {
@@ -229,16 +223,16 @@
               edit: {},
             }
                 // FeatureGroup is to store editable layers.
-                var drawnItems_draw_control_36fbae00c1a7394d74c1c03c0780dfff =
+                var drawnItems_draw_control_5632a111f8423fe22f3509c1f6caf48a =
                     new L.featureGroup().addTo(
-                        map_439753fc6d15b8b90191e1e7fdd92d1c
+                        map_e173de902f44bedb7028aa5a6b444cfd
                     );
 
-            options.edit.featureGroup = drawnItems_draw_control_36fbae00c1a7394d74c1c03c0780dfff;
-            var draw_control_36fbae00c1a7394d74c1c03c0780dfff = new L.Control.Draw(
+            options.edit.featureGroup = drawnItems_draw_control_5632a111f8423fe22f3509c1f6caf48a;
+            var draw_control_5632a111f8423fe22f3509c1f6caf48a = new L.Control.Draw(
                 options
-            ).addTo( map_439753fc6d15b8b90191e1e7fdd92d1c );
-            map_439753fc6d15b8b90191e1e7fdd92d1c.on(L.Draw.Event.CREATED, function(e) {
+            ).addTo( map_e173de902f44bedb7028aa5a6b444cfd );
+            map_e173de902f44bedb7028aa5a6b444cfd.on(L.Draw.Event.CREATED, function(e) {
                 var layer = e.layer,
                     type = e.layerType;
                 var coords = JSON.stringify(layer.toGeoJSON());
@@ -246,15 +240,15 @@
                     alert(coords);
                     console.log(coords);
                 });
-                drawnItems_draw_control_36fbae00c1a7394d74c1c03c0780dfff.addLayer(layer);
+                drawnItems_draw_control_5632a111f8423fe22f3509c1f6caf48a.addLayer(layer);
             });
-            map_439753fc6d15b8b90191e1e7fdd92d1c.on('draw:created', function(e) {
-                drawnItems_draw_control_36fbae00c1a7394d74c1c03c0780dfff.addLayer(e.layer);
+            map_e173de902f44bedb7028aa5a6b444cfd.on('draw:created', function(e) {
+                drawnItems_draw_control_5632a111f8423fe22f3509c1f6caf48a.addLayer(e.layer);
             });
 
             
             document.getElementById('export').onclick = function(e) {
-                var data = drawnItems_draw_control_36fbae00c1a7394d74c1c03c0780dfff.toGeoJSON();
+                var data = drawnItems_draw_control_5632a111f8423fe22f3509c1f6caf48a.toGeoJSON();
                 var convertedData = 'text/json;charset=utf-8,'
                     + encodeURIComponent(JSON.stringify(data));
                 document.getElementById('export').setAttribute(
@@ -267,22 +261,22 @@
             
         
     
-            var layer_control_8a90c1fd5bb21dad46af6d2495ccb0ff_layers = {
+            var layer_control_3092ebfdc3e6e2cabcb740b02641b6e4_layers = {
                 base_layers : {
-                    "openstreetmap" : tile_layer_cec501a45dd71270cfd92521d9b4cf8e,
+                    "openstreetmap" : tile_layer_2a56fefa36be2b69e3388d91def5efac,
                 },
                 overlays :  {
                 },
             };
-            let layer_control_8a90c1fd5bb21dad46af6d2495ccb0ff = L.control.layers(
-                layer_control_8a90c1fd5bb21dad46af6d2495ccb0ff_layers.base_layers,
-                layer_control_8a90c1fd5bb21dad46af6d2495ccb0ff_layers.overlays,
+            let layer_control_3092ebfdc3e6e2cabcb740b02641b6e4 = L.control.layers(
+                layer_control_3092ebfdc3e6e2cabcb740b02641b6e4_layers.base_layers,
+                layer_control_3092ebfdc3e6e2cabcb740b02641b6e4_layers.overlays,
                 {
   "position": "topright",
   "collapsed": true,
   "autoZIndex": true,
 }
-            ).addTo(map_439753fc6d15b8b90191e1e7fdd92d1c);
+            ).addTo(map_e173de902f44bedb7028aa5a6b444cfd);
 
         
 </script>
