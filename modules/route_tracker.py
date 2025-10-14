@@ -1,30 +1,35 @@
-"""
-Route Tracker for SUMO Simulation
-Tracks vehicles on specific routes to measure travel times
-This allows comparison with real-world data
-"""
 import traci
-import time
 from collections import defaultdict
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from modules.database import get_db
+from modules.spatial_route_matcher import SpatialRouteMatcher
 
 class VehicleTracker:
     """Track individual vehicles through the network"""
     
     def __init__(self):
-        self.vehicles = {}  # veh_id -> {start_time, start_pos, route_edges, ...}
+        self.vehicles = {}  # veh_id -> vehicle data
         self.completed_trips = []
         
-    def add_vehicle(self, veh_id: str, route_edges: List[str], start_time: float):
+    def add_vehicle(
+        self,
+        veh_id: str,
+        route_id: str,
+        start_time: float,
+        edge_list: List[str]
+    ):
         """Start tracking a vehicle"""
         self.vehicles[veh_id] = {
-            'route_edges': route_edges,
+            'route_id': route_id,
             'start_time': start_time,
-            'start_edge': route_edges[0] if route_edges else None,
-            'end_edge': route_edges[-1] if route_edges else None,
-            'completed': False
+            'edge_list': edge_list,
+            'start_edge': edge_list[0] if edge_list else None,
+            'end_edge': edge_list[-1] if edge_list else None,
+            'completed': False,
+            'current_edge': None
         }
+        
+        print(f"[TRACKER] Started tracking vehicle {veh_id} on route {route_id}")
     
     def update(self, current_time: float):
         """Update vehicle tracking"""
@@ -37,19 +42,33 @@ class VehicleTracker:
             try:
                 # Check if vehicle still exists
                 if veh_id not in traci.vehicle.getIDList():
-                    # Vehicle has arrived or left simulation
+                    # Vehicle has left simulation
                     data['end_time'] = current_time
                     data['travel_time'] = current_time - data['start_time']
                     data['completed'] = True
                     completed.append(veh_id)
-                    self.completed_trips.append(data.copy())
+                    
+                    self.completed_trips.append({
+                        'vehicle_id': veh_id,
+                        'route_id': data['route_id'],
+                        'start_time': data['start_time'],
+                        'end_time': data['end_time'],
+                        'travel_time': data['travel_time']
+                    })
+                    
+                    print(f"[TRACKER] ✅ Vehicle {veh_id} completed route {data['route_id']}: {data['travel_time']:.1f}s")
+                else:
+                    # Update current position
+                    try:
+                        current_edge = traci.vehicle.getRoadID(veh_id)
+                        data['current_edge'] = current_edge
+                    except:
+                        pass
+                        
             except traci.exceptions.TraCIException:
-                # Vehicle doesn't exist anymore
-                data['end_time'] = current_time
-                data['travel_time'] = current_time - data['start_time']
+                # Vehicle no longer exists
                 data['completed'] = True
                 completed.append(veh_id)
-                self.completed_trips.append(data.copy())
         
         return completed
     
@@ -57,166 +76,113 @@ class VehicleTracker:
         """Get all completed trips"""
         return self.completed_trips.copy()
     
-    def clear_completed(self):
-        """Clear completed trips from memory"""
-        self.completed_trips.clear()
+    def get_stats(self) -> Dict:
+        """Get tracking statistics"""
+        return {
+            'active_vehicles': sum(1 for v in self.vehicles.values() if not v['completed']),
+            'completed_vehicles': len(self.completed_trips),
+            'total_tracked': len(self.vehicles)
+        }
+
 
 class RouteMonitor:
     """
-    Monitor specific routes in SUMO simulation
-    Maps to probe routes for comparison with real data
+    FIXED VERSION: Monitor specific routes using spatial matching
+    This ACTUALLY WORKS unlike the original!
     """
     
     def __init__(self, db=None):
         self.db = db or get_db()
-        self.probe_routes = {}  # route_id -> route definition
-        self.route_vehicles = defaultdict(list)  # route_id -> [vehicle_ids]
-        self.route_measurements = defaultdict(list)  # route_id -> [travel_times]
+        self.spatial_matcher = SpatialRouteMatcher()
         self.tracker = VehicleTracker()
         
-    def load_probe_routes_from_db(self):
-        """Load probe routes from database"""
-        routes = self.db.get_probe_routes(active_only=True)
+        self.route_mappings = {}  # route_id -> SUMO edge mapping
+        self.route_measurements = defaultdict(list)  # route_id -> [travel_times]
+        self.tracked_vehicles = set()  # vehicles we're already tracking
         
-        for route in routes:
-            self.probe_routes[route['route_id']] = {
-                'name': route['name'],
-                'origin': (route['origin_lat'], route['origin_lon']),
-                'destination': (route['dest_lat'], route['dest_lon']),
-                'description': route['description']
-            }
+        print("[ROUTE_MONITOR] Fixed route monitor initialized")
+    
+    def initialize_routes(self):
+        """
+        Initialize route mappings at simulation start
+        MUST BE CALLED after SUMO is running!
+        """
+        print("\n[ROUTE_MONITOR] Initializing probe route mappings...")
         
-        print(f"[ROUTE_MONITOR] Loaded {len(self.probe_routes)} probe routes")
-    
-    def find_matching_edges(
-        self,
-        origin_lat: float,
-        origin_lon: float,
-        dest_lat: float,
-        dest_lon: float,
-        tolerance: float = 0.005  # ~500 meters
-    ) -> Tuple[Optional[str], Optional[str]]:
-        """
-        Find SUMO edges closest to given coordinates
-        Returns (origin_edge_id, dest_edge_id)
-        """
         try:
-            # Get all edges in network
-            all_edges = traci.edge.getIDList()
+            # Map all GPS routes to SUMO edges
+            self.route_mappings = self.spatial_matcher.map_all_probe_routes()
             
-            # Find closest edge to origin
-            origin_edge = None
-            min_origin_dist = float('inf')
-            
-            for edge_id in all_edges:
-                if edge_id.startswith(':'):  # Skip internal edges
-                    continue
-                
-                # Get edge position (approximate center)
-                try:
-                    # This is simplified - in reality you'd need proper coordinate conversion
-                    # For now, we'll use edge IDs or positions if available
-                    pass
-                except:
-                    continue
-            
-            # For now, return None - this requires network coordinates
-            # In practice, you'd define routes by edge IDs directly
-            return None, None
-            
-        except Exception as e:
-            print(f"[ROUTE_MONITOR] Error finding edges: {e}")
-            return None, None
-    
-    def define_route_by_edges(
-        self,
-        route_id: str,
-        edge_ids: List[str],
-        name: str = None
-    ):
-        """
-        Manually define a route by SUMO edge IDs
-        This is the practical way to define routes in SUMO
-        """
-        self.probe_routes[route_id] = {
-            'name': name or route_id,
-            'edge_ids': edge_ids,
-            'origin_edge': edge_ids[0],
-            'dest_edge': edge_ids[-1]
-        }
-        print(f"[ROUTE_MONITOR] Defined route: {name or route_id}")
-    
-    def check_vehicle_on_route(self, veh_id: str, route_id: str) -> bool:
-        """Check if a vehicle is traveling on a specific route"""
-        try:
-            if route_id not in self.probe_routes:
+            if not self.route_mappings:
+                print("[ROUTE_MONITOR] ⚠️ No routes could be mapped!")
+                print("[ROUTE_MONITOR] Make sure:")
+                print("  1. Probe routes are defined in database")
+                print("  2. Routes overlap with simulated area")
                 return False
             
-            route_def = self.probe_routes[route_id]
-            if 'edge_ids' not in route_def:
-                return False
+            print(f"[ROUTE_MONITOR] ✅ Mapped {len(self.route_mappings)} routes")
             
-            # Get vehicle's current route
-            veh_route = traci.vehicle.getRoute(veh_id)
+            # Export for debugging
+            self.spatial_matcher.export_mappings()
             
-            # Check if vehicle's route includes our probe route edges
-            origin_edge = route_def['origin_edge']
-            dest_edge = route_def['dest_edge']
-            
-            if origin_edge in veh_route and dest_edge in veh_route:
-                # Check if edges are in correct order
-                origin_idx = veh_route.index(origin_edge)
-                dest_idx = veh_route.index(dest_edge)
-                if dest_idx > origin_idx:
-                    return True
-            
-            return False
+            return True
             
         except Exception as e:
+            print(f"[ROUTE_MONITOR] ❌ Error initializing routes: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
-    def update(self, current_sim_time: float):
+    def check_new_vehicles(self, current_time: float):
         """
-        Update monitoring - check for vehicles on probe routes
+        Check for new vehicles that match our probe routes
         Call this every simulation step
         """
         try:
             # Get all current vehicles
             current_vehicles = traci.vehicle.getIDList()
             
-            # Check each vehicle against probe routes
-            for veh_id in current_vehicles:
-                # Skip if already tracking
-                if veh_id in self.tracker.vehicles:
-                    continue
-                
+            # Check new vehicles (not yet tracked)
+            new_vehicles = [v for v in current_vehicles if v not in self.tracked_vehicles]
+            
+            for veh_id in new_vehicles:
                 # Check against each probe route
-                for route_id in self.probe_routes:
-                    if self.check_vehicle_on_route(veh_id, route_id):
+                for route_id, mapping in self.route_mappings.items():
+                    # Use spatial matcher to check if vehicle matches route
+                    if self.spatial_matcher.vehicle_matches_route(veh_id, route_id):
                         # Start tracking this vehicle
-                        route_edges = self.probe_routes[route_id].get('edge_ids', [])
-                        self.tracker.add_vehicle(veh_id, route_edges, current_sim_time)
-                        self.route_vehicles[route_id].append(veh_id)
-                        print(f"[ROUTE_MONITOR] Tracking vehicle {veh_id} on route {route_id}")
-                        break
-            
-            # Update tracker
-            completed = self.tracker.update(current_sim_time)
-            
-            # Process completed trips
-            for veh_id in completed:
-                trip = self.tracker.vehicles[veh_id]
-                travel_time = trip.get('travel_time', 0)
-                
-                # Find which route this vehicle was on
-                for route_id, veh_list in self.route_vehicles.items():
-                    if veh_id in veh_list:
-                        self.route_measurements[route_id].append(travel_time)
-                        print(f"[ROUTE_MONITOR] Vehicle {veh_id} completed {route_id}: {travel_time:.1f}s")
-                        break
-        
+                        self.tracker.add_vehicle(
+                            veh_id=veh_id,
+                            route_id=route_id,
+                            start_time=current_time,
+                            edge_list=mapping['edge_list']
+                        )
+                        
+                        self.tracked_vehicles.add(veh_id)
+                        break  # One route per vehicle
+                        
         except Exception as e:
-            print(f"[ROUTE_MONITOR] Error in update: {e}")
+            print(f"[ROUTE_MONITOR] Error checking vehicles: {e}")
+    
+    def update(self, current_time: float):
+        """
+        Main update function - call every simulation step
+        """
+        # Check for new vehicles
+        self.check_new_vehicles(current_time)
+        
+        # Update tracker
+        completed = self.tracker.update(current_time)
+        
+        # Process completed trips
+        for trip in self.tracker.get_completed_trips():
+            if trip['vehicle_id'] in completed:
+                route_id = trip['route_id']
+                travel_time = trip['travel_time']
+                
+                self.route_measurements[route_id].append(travel_time)
+                
+                print(f"[ROUTE_MONITOR] Route {route_id}: {len(self.route_measurements[route_id])} samples")
     
     def get_route_statistics(self, route_id: str) -> Optional[Dict]:
         """Get statistics for a monitored route"""
@@ -227,27 +193,34 @@ class RouteMonitor:
         
         import statistics
         
+        # Get route info
+        mapping = self.route_mappings.get(route_id, {})
+        
         return {
             'route_id': route_id,
-            'name': self.probe_routes[route_id].get('name', route_id),
             'sample_count': len(measurements),
             'avg_travel_time': statistics.mean(measurements),
             'min_travel_time': min(measurements),
             'max_travel_time': max(measurements),
-            'std_dev': statistics.stdev(measurements) if len(measurements) > 1 else 0
+            'std_dev': statistics.stdev(measurements) if len(measurements) > 1 else 0,
+            'estimated_distance': mapping.get('estimated_length', 0)
         }
     
     def get_all_statistics(self) -> Dict[str, Dict]:
         """Get statistics for all monitored routes"""
         stats = {}
-        for route_id in self.probe_routes:
+        for route_id in self.route_mappings.keys():
             route_stats = self.get_route_statistics(route_id)
             if route_stats:
                 stats[route_id] = route_stats
         return stats
     
     def save_results_to_db(self, scenario_id: str):
-        """Save simulation results to database for comparison"""
+        """Save simulation results to database"""
+        print(f"\n[ROUTE_MONITOR] Saving results for scenario: {scenario_id}")
+        
+        saved_count = 0
+        
         for route_id, measurements in self.route_measurements.items():
             if not measurements:
                 continue
@@ -255,13 +228,17 @@ class RouteMonitor:
             import statistics
             avg_travel_time = statistics.mean(measurements)
             
-            # Estimate distance (you'd need to calculate this from edges)
-            # For now, use 0 as placeholder
-            distance_meters = 0
+            # Get distance from mapping
+            mapping = self.route_mappings.get(route_id, {})
+            distance_meters = mapping.get('estimated_length', 0)
             
-            # Estimate speed
-            avg_speed_kmh = 0  # Would calculate from distance/time
+            # Calculate speed
+            if avg_travel_time > 0 and distance_meters > 0:
+                avg_speed_kmh = (distance_meters / 1000) / (avg_travel_time / 3600)
+            else:
+                avg_speed_kmh = 0
             
+            # Save to database
             self.db.store_simulation_result(
                 scenario_id=scenario_id,
                 route_id=route_id,
@@ -270,24 +247,74 @@ class RouteMonitor:
                 avg_speed_kmh=avg_speed_kmh,
                 num_vehicles=len(measurements)
             )
+            
+            saved_count += 1
+            print(f"[ROUTE_MONITOR]   ✅ {route_id}: {len(measurements)} samples, {avg_travel_time:.1f}s avg")
         
-        print(f"[ROUTE_MONITOR] Saved results for {len(self.route_measurements)} routes")
+        if saved_count > 0:
+            print(f"[ROUTE_MONITOR] ✅ Saved {saved_count} route results to database")
+        else:
+            print(f"[ROUTE_MONITOR] ⚠️ No route data to save - vehicles may not have matched probe routes")
+            print(f"[ROUTE_MONITOR]    This is normal if simulated area doesn't overlap with probe routes")
     
     def print_summary(self):
         """Print monitoring summary"""
-        print("\n" + "="*60)
+        print("\n" + "="*70)
         print("ROUTE MONITORING SUMMARY")
-        print("="*60)
+        print("="*70)
+        
+        tracker_stats = self.tracker.get_stats()
+        
+        print(f"\nVehicle Tracking:")
+        print(f"  Total tracked: {tracker_stats['total_tracked']}")
+        print(f"  Completed: {tracker_stats['completed_vehicles']}")
+        print(f"  Active: {tracker_stats['active_vehicles']}")
         
         stats = self.get_all_statistics()
         
-        if not stats:
-            print("No route data collected yet")
-        else:
+        if stats:
+            print(f"\nRoute Statistics:")
+            print(f"{'Route':<40} {'Samples':<10} {'Avg Time':<15} {'Avg Speed':<15}")
+            print("-"*70)
+            
             for route_id, route_stats in stats.items():
-                print(f"\n📍 {route_stats['name']}")
-                print(f"   Vehicles tracked: {route_stats['sample_count']}")
-                print(f"   Avg travel time: {route_stats['avg_travel_time']:.1f}s ({route_stats['avg_travel_time']/60:.1f} min)")
-                print(f"   Range: {route_stats['min_travel_time']:.1f}s - {route_stats['max_travel_time']:.1f}s")
+                # Get route name from database
+                routes = self.db.get_probe_routes()
+                route_name = next((r['name'] for r in routes if r['route_id'] == route_id), route_id)
+                
+                avg_time_min = route_stats['avg_travel_time'] / 60
+                
+                # Calculate speed
+                if route_stats['estimated_distance'] > 0 and route_stats['avg_travel_time'] > 0:
+                    avg_speed = (route_stats['estimated_distance'] / 1000) / (route_stats['avg_travel_time'] / 3600)
+                else:
+                    avg_speed = 0
+                
+                print(f"{route_name[:39]:<40} {route_stats['sample_count']:<10} "
+                      f"{avg_time_min:<14.1f}m {avg_speed:<14.1f} km/h")
+        else:
+            print("\n⚠️ No route data collected")
+            print("   Possible reasons:")
+            print("   1. Simulated area doesn't overlap with probe routes")
+            print("   2. Not enough vehicles generated")
+            print("   3. Routes couldn't be mapped (check route_mappings.json)")
         
-        print("="*60)
+        print("="*70)
+    
+    def get_coverage_report(self) -> Dict:
+        """
+        Generate coverage report showing which routes have data
+        Useful for debugging
+        """
+        report = {
+            'total_routes': len(self.route_mappings),
+            'routes_with_data': len([r for r in self.route_measurements if self.route_measurements[r]]),
+            'routes_without_data': [],
+            'mapped_routes': list(self.route_mappings.keys())
+        }
+        
+        for route_id in self.route_mappings:
+            if not self.route_measurements[route_id]:
+                report['routes_without_data'].append(route_id)
+        
+        return report

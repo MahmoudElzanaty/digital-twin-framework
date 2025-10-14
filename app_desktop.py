@@ -25,6 +25,7 @@ from modules.area_comparison import AreaBasedComparison
 from modules.ai_predictor import SimpleTrafficPredictor, AdaptivePredictor
 from modules.calibrator import SUMOCalibrator
 
+
 # ============== WORKER THREADS ==============
 
 class DataCollectionWorker(QThread):
