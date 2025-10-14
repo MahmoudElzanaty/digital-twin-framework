@@ -16,6 +16,7 @@ from folium import plugins
 from geopy.geocoders import Nominatim
 
 # import your framework modules
+from modules.auto_route_generator import AutoRouteGenerator
 from modules.network_builder import generate_network_from_bbox
 from modules.demand_generator import generate_routes
 from modules.simulator import create_config, run_simulation
@@ -208,6 +209,53 @@ class MainWindow(QWidget):
         self.status_label.setFont(QFont("Segoe UI", 9))
         main_layout.addWidget(self.status_label)
 
+    def manually_regenerate_routes(self):
+        """Allow user to customize route generation"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QComboBox, QSpinBox, QDialogButtonBox
+        
+        if not self.selected_bbox:
+            return
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Route Generation Options")
+        layout = QVBoxLayout(dialog)
+        
+        # Strategy
+        layout.addWidget(QLabel("Strategy:"))
+        strategy_combo = QComboBox()
+        strategy_combo.addItems(['grid', 'radial', 'loop', 'mixed'])
+        layout.addWidget(strategy_combo)
+        
+        # Number
+        layout.addWidget(QLabel("Number of routes:"))
+        num_spin = QSpinBox()
+        num_spin.setRange(3, 15)
+        num_spin.setValue(8)
+        layout.addWidget(num_spin)
+        
+        # Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | 
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            generator = AutoRouteGenerator()
+            location = self.location_input.text() or "custom_area"
+            
+            routes = generator.auto_generate_for_area(
+                self.selected_bbox,
+                location,
+                strategy_combo.currentText(),
+                num_spin.value()
+            )
+            
+            QMessageBox.information(self, "Success", 
+                f"Created {len(routes)} routes!")
+
     # ============== TAB 1: MAP & SIMULATION (ORIGINAL - UNTOUCHED) ==============
     
     def create_simulation_tab(self):
@@ -264,14 +312,30 @@ class MainWindow(QWidget):
 
         map_layout.addWidget(self.view, 1)
 
-        # Selection status
-        selection_layout = QHBoxLayout()
+        # Selection status - CREATE LAYOUT FIRST!
+        selection_layout = QHBoxLayout()  # ← Create FIRST
+        
         self.selection_label = QLabel("📌 No area selected")
         self.selection_label.setFont(QFont("Segoe UI", 10))
+        
         self.clear_btn = QPushButton("🗑️ Clear Selection")
         self.clear_btn.setEnabled(False)
         self.clear_btn.setMinimumHeight(35)
         self.clear_btn.clicked.connect(self.on_clear_selection)
+        
+        # Add to layout
+        selection_layout.addWidget(self.selection_label, 1)
+        selection_layout.addWidget(self.clear_btn)
+        
+        # Optional: Add regenerate button (now it works!)
+        # Uncomment these lines if you want the button:
+        # self.regenerate_routes_btn = QPushButton("🔄 Regenerate Routes")
+        # self.regenerate_routes_btn.setEnabled(False)
+        # self.regenerate_routes_btn.setMinimumHeight(35)
+        # self.regenerate_routes_btn.clicked.connect(self.manually_regenerate_routes)
+        # selection_layout.addWidget(self.regenerate_routes_btn)
+        
+        map_layout.addLayout(selection_layout)
         selection_layout.addWidget(self.selection_label, 1)
         selection_layout.addWidget(self.clear_btn)
         map_layout.addLayout(selection_layout)
@@ -879,13 +943,14 @@ class MainWindow(QWidget):
             self.log(f"Search error: {str(e)}", "ERROR")
 
     def on_region_selected(self, data):
-        """Handle region selection from map"""
+        """Handle region selection from map - WITH AUTO ROUTE GENERATION"""
         print(f"[DEBUG] on_region_selected called with data: {data}")
         try:
             coords = json.loads(data)
             self.selected_bbox = coords
             print(f"[DEBUG] Parsed coordinates: {coords}")
 
+            # Calculate approximate area
             lat_diff = abs(coords['north'] - coords['south'])
             lon_diff = abs(coords['east'] - coords['west'])
             area_km2 = lat_diff * lon_diff * 111 * 111
@@ -901,6 +966,50 @@ class MainWindow(QWidget):
             self.log(f"Region selected: {area_km2:.2f} km²", "SUCCESS")
             self.log(f"Bounds: N={coords['north']:.4f}, S={coords['south']:.4f}, "
                     f"E={coords['east']:.4f}, W={coords['west']:.4f}", "INFO")
+
+            # ============ AUTO-GENERATE ROUTES ============
+            location_name = self.location_input.text().strip() or "custom_area"
+            location_name = location_name.replace(",", "").replace(" ", "_").lower()
+            
+            self.log("", "INFO")
+            self.log("🎯 Auto-generating probe routes for selected area...", "INFO")
+            
+            try:
+                generator = AutoRouteGenerator()
+                
+                # Get smart recommendations based on area size
+                strategy = generator.get_recommended_strategy(coords)
+                num_routes = generator.get_recommended_num_routes(coords)
+                
+                self.log(f"📊 Area: {area_km2:.2f} km² → {strategy} strategy, {num_routes} routes", "INFO")
+                
+                # Generate routes
+                routes = generator.auto_generate_for_area(
+                    bbox=coords,
+                    location_name=location_name,
+                    strategy=strategy,
+                    num_routes=num_routes
+                )
+                
+                self.log(f"✅ Auto-created {len(routes)} probe routes!", "SUCCESS")
+                self.log(f"   Routes cover your simulation area and will be tracked", "INFO")
+                self.log("", "INFO")
+                
+                # Show sample routes
+                for route in routes[:3]:
+                    self.log(f"   • {route['name']}", "INFO")
+                
+                if len(routes) > 3:
+                    self.log(f"   • ... and {len(routes)-3} more routes", "INFO")
+                
+                self.log("", "INFO")
+                
+            except Exception as e:
+                self.log(f"⚠️ Could not auto-generate routes: {str(e)}", "WARNING")
+                self.log("   Don't worry - area-based comparison will still work", "INFO")
+                import traceback
+                traceback.print_exc()
+            # =============================================
 
             print(f"[DEBUG] self.selected_bbox is now: {self.selected_bbox}")
 
