@@ -91,12 +91,12 @@ class SimulationWorker(QThread):
     """Background thread for simulation"""
     progress = pyqtSignal(str)
     finished = pyqtSignal(str)
-    
+
     def __init__(self, cfg_file, scenario_id):
         super().__init__()
         self.cfg_file = cfg_file
         self.scenario_id = scenario_id
-    
+
     def run(self):
         try:
             self.progress.emit("Running simulation...")
@@ -106,6 +106,68 @@ class SimulationWorker(QThread):
         except Exception as e:
             self.progress.emit(f"Error: {str(e)}")
             self.finished.emit("")
+
+class ScheduledCollectionWorker(QThread):
+    """Background thread for scheduled data collection"""
+    progress = pyqtSignal(str)
+    collection_complete = pyqtSignal(int, int)  # (current, total)
+    finished = pyqtSignal()
+
+    def __init__(self, api_key, route_ids, interval_minutes, duration_hours):
+        super().__init__()
+        self.api_key = api_key
+        self.route_ids = route_ids
+        self.interval_minutes = interval_minutes
+        self.duration_hours = duration_hours
+        self.running = True
+
+    def run(self):
+        import time
+        try:
+            collector = TrafficDataCollector(self.api_key)
+            start_time = time.time()
+            collection_count = 0
+
+            # Calculate total collections
+            total_collections = int((self.duration_hours * 60) / self.interval_minutes)
+
+            self.progress.emit(f"Starting scheduled collection for {self.duration_hours} hours...")
+
+            while self.running:
+                collection_count += 1
+
+                # Collect data for all routes
+                self.progress.emit(f"Collection #{collection_count}/{total_collections}...")
+                results = collector.collect_all_probe_routes()
+                self.progress.emit(f"✅ Collected data for {len(results)} routes")
+
+                # Emit progress
+                self.collection_complete.emit(collection_count, total_collections)
+
+                # Check if we should stop
+                elapsed_hours = (time.time() - start_time) / 3600
+                if elapsed_hours >= self.duration_hours:
+                    self.progress.emit(f"✅ Completed {self.duration_hours} hours of collection!")
+                    break
+
+                # Wait for next collection
+                if self.running:
+                    self.progress.emit(f"Waiting {self.interval_minutes} minutes...")
+                    for _ in range(self.interval_minutes * 60):
+                        if not self.running:
+                            break
+                        time.sleep(1)
+
+            self.progress.emit("Collection stopped")
+            self.finished.emit()
+
+        except Exception as e:
+            self.progress.emit(f"Error: {str(e)}")
+            self.finished.emit()
+
+    def stop(self):
+        """Stop the collection"""
+        self.running = False
 
 class MapBridge(QObject):
     """Bridge for JavaScript to Python communication"""
@@ -186,19 +248,23 @@ class MainWindow(QWidget):
         self.tab_simulation = self.create_simulation_tab()
         self.tabs.addTab(self.tab_simulation, "🗺️ Map & Simulation")
         
-        # Tab 2: Digital Twin Dashboard (NEW)
+        # Tab 2: Route Selection (NEW - 5 PRIMARY ROUTES)
+        self.tab_routes = self.create_route_selection_tab()
+        self.tabs.addTab(self.tab_routes, "🛣️ Route Selection (5 Routes)")
+
+        # Tab 3: Digital Twin Dashboard (NEW)
         self.tab_dashboard = self.create_dashboard_tab()
         self.tabs.addTab(self.tab_dashboard, "📊 Digital Twin Dashboard")
-        
-        # Tab 3: Calibration Center (NEW)
+
+        # Tab 4: Calibration Center (NEW)
         self.tab_calibration = self.create_calibration_tab()
         self.tabs.addTab(self.tab_calibration, "🔧 Calibration Center")
         
-        # Tab 4: AI Prediction (NEW)
+        # Tab 5: AI Prediction (NEW)
         self.tab_ai = self.create_ai_tab()
         self.tabs.addTab(self.tab_ai, "🤖 AI Prediction")
-        
-        # Tab 5: Results & Analysis (NEW)
+
+        # Tab 6: Results & Analysis (NEW)
         self.tab_results = self.create_results_tab()
         self.tabs.addTab(self.tab_results, "📈 Results & Analysis")
         
@@ -405,10 +471,245 @@ class MainWindow(QWidget):
         console_layout.addWidget(self.console)
 
         layout.addWidget(console_group, 1)
-        
+
         return tab
 
-    # ============== TAB 2: DIGITAL TWIN DASHBOARD ==============
+    # ============== TAB 2: ROUTE SELECTION (5 PRIMARY ROUTES) ==============
+
+    def create_route_selection_tab(self):
+        """Create tab for selecting 5 specific routes for congestion prediction"""
+        from PyQt6.QtWidgets import QScrollArea
+
+        tab = QWidget()
+        main_layout = QVBoxLayout(tab)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Container widget for scrollable content
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # Info section
+        info_label = QLabel(
+            "🛣️ Define 5 specific routes for congestion prediction\n"
+            "Enter location names (e.g., 'Cairo Airport', 'Tahrir Square') and we'll find coordinates automatically!"
+        )
+        info_label.setWordWrap(True)
+        info_label.setFont(QFont("Segoe UI", 10))
+        info_label.setStyleSheet("background-color: #e3f2fd; padding: 10px; border-radius: 5px;")
+        layout.addWidget(info_label)
+
+        # Container for 5 route cards
+        self.route_cards = []
+        for i in range(5):
+            card = self.create_route_card(i + 1)
+            layout.addWidget(card)
+            self.route_cards.append(card)
+
+        # Scheduled Data Collection Section
+        collection_group = QGroupBox("⏰ Scheduled Data Collection")
+        collection_group.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        collection_layout = QVBoxLayout(collection_group)
+
+        # Collection interval
+        interval_layout = QHBoxLayout()
+        interval_layout.addWidget(QLabel("Collection Interval:"))
+        self.collection_interval_spin = QSpinBox()
+        self.collection_interval_spin.setRange(5, 120)
+        self.collection_interval_spin.setValue(15)
+        self.collection_interval_spin.setSuffix(" minutes")
+        interval_layout.addWidget(self.collection_interval_spin)
+        interval_layout.addStretch()
+        collection_layout.addLayout(interval_layout)
+
+        # Collection duration
+        duration_layout = QHBoxLayout()
+        duration_layout.addWidget(QLabel("Collection Duration:"))
+        self.collection_duration_spin = QSpinBox()
+        self.collection_duration_spin.setRange(1, 168)
+        self.collection_duration_spin.setValue(24)
+        self.collection_duration_spin.setSuffix(" hours")
+        duration_layout.addWidget(self.collection_duration_spin)
+        duration_layout.addStretch()
+        collection_layout.addLayout(duration_layout)
+
+        # Collection status
+        self.collection_status_label = QLabel("Status: ⚪ Not running")
+        self.collection_status_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        collection_layout.addWidget(self.collection_status_label)
+
+        # Collection progress
+        self.collection_progress_bar = QProgressBar()
+        self.collection_progress_bar.setValue(0)
+        collection_layout.addWidget(self.collection_progress_bar)
+
+        # Collection buttons
+        collection_btn_layout = QHBoxLayout()
+        self.start_scheduled_btn = QPushButton("▶️ Start Scheduled Collection")
+        self.start_scheduled_btn.clicked.connect(self.start_scheduled_collection)
+        self.start_scheduled_btn.setStyleSheet("background-color: #4CAF50; padding: 8px;")
+        collection_btn_layout.addWidget(self.start_scheduled_btn)
+
+        self.stop_scheduled_btn = QPushButton("⏹️ Stop Collection")
+        self.stop_scheduled_btn.clicked.connect(self.stop_scheduled_collection)
+        self.stop_scheduled_btn.setEnabled(False)
+        self.stop_scheduled_btn.setStyleSheet("background-color: #f44336; padding: 8px;")
+        collection_btn_layout.addWidget(self.stop_scheduled_btn)
+        collection_layout.addLayout(collection_btn_layout)
+
+        layout.addWidget(collection_group)
+
+        # Action buttons at bottom
+        actions_layout = QHBoxLayout()
+
+        self.load_routes_btn = QPushButton("📂 Load Saved Routes")
+        self.load_routes_btn.clicked.connect(self.load_primary_routes)
+        actions_layout.addWidget(self.load_routes_btn)
+
+        self.collect_now_btn = QPushButton("📊 Collect Data Now (All 5 Routes)")
+        self.collect_now_btn.clicked.connect(self.collect_data_from_5_routes)
+        self.collect_now_btn.setStyleSheet("background-color: #2196F3; padding: 8px;")
+        actions_layout.addWidget(self.collect_now_btn)
+
+        actions_layout.addStretch()
+        layout.addLayout(actions_layout)
+
+        layout.addStretch()
+
+        # Set the scroll content
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
+
+        # Initialize scheduled collection worker
+        self.scheduled_worker = None
+
+        return tab
+
+    def create_route_card(self, route_num):
+        """Create a card for one route"""
+        card = QGroupBox(f"🛣️ Route {route_num}")
+        card.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        card_layout = QVBoxLayout(card)
+
+        # Route name
+        name_layout = QHBoxLayout()
+        name_layout.addWidget(QLabel("Route Name:"))
+        route_name_input = QLineEdit()
+        route_name_input.setPlaceholderText(f"e.g., Downtown to Airport")
+        route_name_input.setObjectName(f"route_name_{route_num}")
+        name_layout.addWidget(route_name_input)
+        card_layout.addLayout(name_layout)
+
+        # Origin location name
+        origin_layout = QHBoxLayout()
+        origin_layout.addWidget(QLabel("Origin Location:"))
+        origin_input = QLineEdit()
+        origin_input.setPlaceholderText("e.g., Cairo Airport, Tahrir Square")
+        origin_input.setObjectName(f"origin_location_{route_num}")
+        origin_layout.addWidget(origin_input)
+
+        origin_search_btn = QPushButton("🔍")
+        origin_search_btn.setMaximumWidth(40)
+        origin_search_btn.setToolTip("Find coordinates")
+        origin_search_btn.clicked.connect(lambda checked, num=route_num: self.geocode_origin(num))
+        origin_layout.addWidget(origin_search_btn)
+        card_layout.addLayout(origin_layout)
+
+        # Destination location name
+        dest_layout = QHBoxLayout()
+        dest_layout.addWidget(QLabel("Destination Location:"))
+        dest_input = QLineEdit()
+        dest_input.setPlaceholderText("e.g., New Cairo, Giza Pyramids")
+        dest_input.setObjectName(f"dest_location_{route_num}")
+        dest_layout.addWidget(dest_input)
+
+        dest_search_btn = QPushButton("🔍")
+        dest_search_btn.setMaximumWidth(40)
+        dest_search_btn.setToolTip("Find coordinates")
+        dest_search_btn.clicked.connect(lambda checked, num=route_num: self.geocode_destination(num))
+        dest_layout.addWidget(dest_search_btn)
+        card_layout.addLayout(dest_layout)
+
+        # Coordinates display (read-only, filled by geocoding)
+        coords_layout = QHBoxLayout()
+        coords_label = QLabel("Coordinates:")
+        coords_label.setStyleSheet("font-size: 9pt; color: #666;")
+        coords_layout.addWidget(coords_label)
+
+        coords_display = QLabel("Not set")
+        coords_display.setObjectName(f"coords_display_{route_num}")
+        coords_display.setStyleSheet("font-size: 9pt; color: #666;")
+        coords_display.setWordWrap(True)
+        coords_layout.addWidget(coords_display, 1)
+        card_layout.addLayout(coords_layout)
+
+        # Hidden coordinate fields (for actual storage)
+        origin_lat_input = QDoubleSpinBox()
+        origin_lat_input.setRange(-90, 90)
+        origin_lat_input.setDecimals(6)
+        origin_lat_input.setValue(30.0444)
+        origin_lat_input.setObjectName(f"origin_lat_{route_num}")
+        origin_lat_input.setVisible(False)
+
+        origin_lon_input = QDoubleSpinBox()
+        origin_lon_input.setRange(-180, 180)
+        origin_lon_input.setDecimals(6)
+        origin_lon_input.setValue(31.2357)
+        origin_lon_input.setObjectName(f"origin_lon_{route_num}")
+        origin_lon_input.setVisible(False)
+
+        dest_lat_input = QDoubleSpinBox()
+        dest_lat_input.setRange(-90, 90)
+        dest_lat_input.setDecimals(6)
+        dest_lat_input.setValue(30.0644)
+        dest_lat_input.setObjectName(f"dest_lat_{route_num}")
+        dest_lat_input.setVisible(False)
+
+        dest_lon_input = QDoubleSpinBox()
+        dest_lon_input.setRange(-180, 180)
+        dest_lon_input.setDecimals(6)
+        dest_lon_input.setValue(31.2557)
+        dest_lon_input.setObjectName(f"dest_lon_{route_num}")
+        dest_lon_input.setVisible(False)
+
+        card_layout.addWidget(origin_lat_input)
+        card_layout.addWidget(origin_lon_input)
+        card_layout.addWidget(dest_lat_input)
+        card_layout.addWidget(dest_lon_input)
+
+        # Action buttons for this route
+        btn_layout = QHBoxLayout()
+
+        save_btn = QPushButton(f"💾 Save")
+        save_btn.clicked.connect(lambda checked, num=route_num: self.save_route(num))
+        btn_layout.addWidget(save_btn)
+
+        collect_btn = QPushButton(f"📊 Collect")
+        collect_btn.clicked.connect(lambda checked, num=route_num: self.collect_route_data(num))
+        btn_layout.addWidget(collect_btn)
+
+        view_btn = QPushButton(f"🗺️ Map")
+        view_btn.clicked.connect(lambda checked, num=route_num: self.view_route_on_map(num))
+        btn_layout.addWidget(view_btn)
+
+        btn_layout.addStretch()
+        card_layout.addLayout(btn_layout)
+
+        # Status label
+        status_label = QLabel("⚪ Not configured")
+        status_label.setObjectName(f"status_{route_num}")
+        card_layout.addWidget(status_label)
+
+        return card
+
+    # ============== TAB 3: DIGITAL TWIN DASHBOARD ==============
     
     def create_dashboard_tab(self):
         """Create digital twin dashboard"""
@@ -1442,6 +1743,327 @@ class MainWindow(QWidget):
                 route_file = os.path.join(route_dir, files[-1])
         
         return network_file, route_file
+
+    # ============== ROUTE SELECTION EVENT HANDLERS ==============
+
+    def save_route(self, route_num):
+        """Save a specific route to database"""
+        try:
+            # Find the widgets by object name
+            route_name = self.findChild(QLineEdit, f"route_name_{route_num}").text()
+            origin_lat = self.findChild(QDoubleSpinBox, f"origin_lat_{route_num}").value()
+            origin_lon = self.findChild(QDoubleSpinBox, f"origin_lon_{route_num}").value()
+            dest_lat = self.findChild(QDoubleSpinBox, f"dest_lat_{route_num}").value()
+            dest_lon = self.findChild(QDoubleSpinBox, f"dest_lon_{route_num}").value()
+
+            if not route_name.strip():
+                QMessageBox.warning(self, "Missing Name", f"Please enter a name for Route {route_num}")
+                return
+
+            # Create route ID
+            route_id = f"primary_route_{route_num}"
+
+            # Save to database
+            self.db.add_probe_route(
+                route_id=route_id,
+                name=route_name,
+                origin_lat=origin_lat,
+                origin_lon=origin_lon,
+                dest_lat=dest_lat,
+                dest_lon=dest_lon,
+                description=f"Primary route #{route_num} for congestion prediction",
+                is_primary=True,
+                priority=route_num
+            )
+
+            # Update status label
+            status_label = self.findChild(QLabel, f"status_{route_num}")
+            status_label.setText(f"✅ Saved to database")
+            status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+
+            QMessageBox.information(self, "Success", f"Route {route_num} saved successfully!")
+            self.refresh_dashboard()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save route: {str(e)}")
+
+    def collect_route_data(self, route_num):
+        """Collect data for a specific route"""
+        if not self.api_key:
+            QMessageBox.warning(self, "API Key Required", "Please configure API key in the Dashboard tab first!")
+            return
+
+        try:
+            route_id = f"primary_route_{route_num}"
+
+            # Get route data from widgets
+            origin_lat = self.findChild(QDoubleSpinBox, f"origin_lat_{route_num}").value()
+            origin_lon = self.findChild(QDoubleSpinBox, f"origin_lon_{route_num}").value()
+            dest_lat = self.findChild(QDoubleSpinBox, f"dest_lat_{route_num}").value()
+            dest_lon = self.findChild(QDoubleSpinBox, f"dest_lon_{route_num}").value()
+
+            # Collect data
+            collector = TrafficDataCollector(self.api_key)
+            result = collector.fetch_route_traffic(
+                origin_lat=origin_lat,
+                origin_lon=origin_lon,
+                dest_lat=dest_lat,
+                dest_lon=dest_lon,
+                route_id=route_id
+            )
+
+            if result:
+                status_label = self.findChild(QLabel, f"status_{route_num}")
+                status_label.setText(f"✅ Data collected: {result['speed_kmh']} km/h")
+                status_label.setStyleSheet("color: #4CAF50;")
+
+                QMessageBox.information(
+                    self, "Success",
+                    f"Data collected for Route {route_num}:\n"
+                    f"Travel time: {result['travel_time_seconds']}s\n"
+                    f"Speed: {result['speed_kmh']} km/h"
+                )
+            else:
+                QMessageBox.warning(self, "Failed", f"Could not collect data for Route {route_num}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to collect data: {str(e)}")
+
+    def view_route_on_map(self, route_num):
+        """View route on map (opens Google Maps in browser)"""
+        try:
+            origin_lat = self.findChild(QDoubleSpinBox, f"origin_lat_{route_num}").value()
+            origin_lon = self.findChild(QDoubleSpinBox, f"origin_lon_{route_num}").value()
+            dest_lat = self.findChild(QDoubleSpinBox, f"dest_lat_{route_num}").value()
+            dest_lon = self.findChild(QDoubleSpinBox, f"dest_lon_{route_num}").value()
+
+            # Create Google Maps URL
+            url = f"https://www.google.com/maps/dir/{origin_lat},{origin_lon}/{dest_lat},{dest_lon}"
+
+            # Open in browser
+            import webbrowser
+            webbrowser.open(url)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open map: {str(e)}")
+
+    def load_primary_routes(self):
+        """Load saved primary routes from database"""
+        try:
+            routes = self.db.get_primary_routes()
+
+            if not routes:
+                QMessageBox.information(self, "No Routes", "No saved primary routes found in database.")
+                return
+
+            # Load each route into its slot
+            for route in routes:
+                priority = route['priority']
+                if 1 <= priority <= 5:
+                    self.findChild(QLineEdit, f"route_name_{priority}").setText(route['name'])
+                    self.findChild(QDoubleSpinBox, f"origin_lat_{priority}").setValue(route['origin_lat'])
+                    self.findChild(QDoubleSpinBox, f"origin_lon_{priority}").setValue(route['origin_lon'])
+                    self.findChild(QDoubleSpinBox, f"dest_lat_{priority}").setValue(route['dest_lat'])
+                    self.findChild(QDoubleSpinBox, f"dest_lon_{priority}").setValue(route['dest_lon'])
+
+                    # Update coords display
+                    self.update_coords_display(priority)
+
+                    status_label = self.findChild(QLabel, f"status_{priority}")
+                    status_label.setText(f"✅ Loaded from database")
+                    status_label.setStyleSheet("color: #4CAF50;")
+
+            QMessageBox.information(self, "Success", f"Loaded {len(routes)} primary routes!")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load routes: {str(e)}")
+
+    def collect_data_from_5_routes(self):
+        """Collect data from all 5 primary routes"""
+        if not self.api_key:
+            QMessageBox.warning(self, "API Key Required", "Please configure API key in the Dashboard tab first!")
+            return
+
+        try:
+            collector = TrafficDataCollector(self.api_key)
+            success_count = 0
+
+            for route_num in range(1, 6):
+                route_id = f"primary_route_{route_num}"
+                origin_lat = self.findChild(QDoubleSpinBox, f"origin_lat_{route_num}").value()
+                origin_lon = self.findChild(QDoubleSpinBox, f"origin_lon_{route_num}").value()
+                dest_lat = self.findChild(QDoubleSpinBox, f"dest_lat_{route_num}").value()
+                dest_lon = self.findChild(QDoubleSpinBox, f"dest_lon_{route_num}").value()
+
+                result = collector.fetch_route_traffic(
+                    origin_lat=origin_lat,
+                    origin_lon=origin_lon,
+                    dest_lat=dest_lat,
+                    dest_lon=dest_lon,
+                    route_id=route_id
+                )
+
+                if result:
+                    success_count += 1
+                    status_label = self.findChild(QLabel, f"status_{route_num}")
+                    status_label.setText(f"✅ {result['speed_kmh']} km/h")
+                    status_label.setStyleSheet("color: #4CAF50;")
+
+            QMessageBox.information(
+                self, "Collection Complete",
+                f"Successfully collected data from {success_count}/5 routes!"
+            )
+            self.refresh_dashboard()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to collect data: {str(e)}")
+
+    def geocode_origin(self, route_num):
+        """Geocode origin location name to coordinates"""
+        location_input = self.findChild(QLineEdit, f"origin_location_{route_num}")
+        location_name = location_input.text().strip()
+
+        if not location_name:
+            QMessageBox.warning(self, "Missing Location", "Please enter an origin location name!")
+            return
+
+        try:
+            geolocator = Nominatim(user_agent="digital_twin_traffic_simulator")
+            location = geolocator.geocode(location_name)
+
+            if location:
+                # Set coordinates
+                self.findChild(QDoubleSpinBox, f"origin_lat_{route_num}").setValue(location.latitude)
+                self.findChild(QDoubleSpinBox, f"origin_lon_{route_num}").setValue(location.longitude)
+
+                # Update display
+                self.update_coords_display(route_num)
+
+                QMessageBox.information(
+                    self, "Location Found",
+                    f"Origin: {location.address}\n"
+                    f"Coordinates: {location.latitude:.6f}, {location.longitude:.6f}"
+                )
+            else:
+                QMessageBox.warning(self, "Not Found", f"Could not find location: {location_name}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Geocoding failed: {str(e)}")
+
+    def geocode_destination(self, route_num):
+        """Geocode destination location name to coordinates"""
+        location_input = self.findChild(QLineEdit, f"dest_location_{route_num}")
+        location_name = location_input.text().strip()
+
+        if not location_name:
+            QMessageBox.warning(self, "Missing Location", "Please enter a destination location name!")
+            return
+
+        try:
+            geolocator = Nominatim(user_agent="digital_twin_traffic_simulator")
+            location = geolocator.geocode(location_name)
+
+            if location:
+                # Set coordinates
+                self.findChild(QDoubleSpinBox, f"dest_lat_{route_num}").setValue(location.latitude)
+                self.findChild(QDoubleSpinBox, f"dest_lon_{route_num}").setValue(location.longitude)
+
+                # Update display
+                self.update_coords_display(route_num)
+
+                QMessageBox.information(
+                    self, "Location Found",
+                    f"Destination: {location.address}\n"
+                    f"Coordinates: {location.latitude:.6f}, {location.longitude:.6f}"
+                )
+            else:
+                QMessageBox.warning(self, "Not Found", f"Could not find location: {location_name}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Geocoding failed: {str(e)}")
+
+    def update_coords_display(self, route_num):
+        """Update the coordinates display label"""
+        origin_lat = self.findChild(QDoubleSpinBox, f"origin_lat_{route_num}").value()
+        origin_lon = self.findChild(QDoubleSpinBox, f"origin_lon_{route_num}").value()
+        dest_lat = self.findChild(QDoubleSpinBox, f"dest_lat_{route_num}").value()
+        dest_lon = self.findChild(QDoubleSpinBox, f"dest_lon_{route_num}").value()
+
+        coords_display = self.findChild(QLabel, f"coords_display_{route_num}")
+        coords_display.setText(
+            f"Origin: ({origin_lat:.4f}, {origin_lon:.4f}) → Dest: ({dest_lat:.4f}, {dest_lon:.4f})"
+        )
+        coords_display.setStyleSheet("font-size: 9pt; color: #2196F3;")
+
+    def start_scheduled_collection(self):
+        """Start scheduled data collection"""
+        if not self.api_key:
+            QMessageBox.warning(self, "API Key Required", "Please configure API key in the Dashboard tab first!")
+            return
+
+        interval = self.collection_interval_spin.value()
+        duration = self.collection_duration_spin.value()
+
+        reply = QMessageBox.question(
+            self, "Start Scheduled Collection",
+            f"Start collecting data every {interval} minutes for {duration} hours?\n\n"
+            f"This will collect data from all 5 routes automatically.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            # Get route IDs
+            route_ids = [f"primary_route_{i}" for i in range(1, 6)]
+
+            # Start worker
+            self.scheduled_worker = ScheduledCollectionWorker(
+                self.api_key,
+                route_ids,
+                interval,
+                duration
+            )
+
+            self.scheduled_worker.progress.connect(self.collection_status_label.setText)
+            self.scheduled_worker.collection_complete.connect(self.on_scheduled_collection_update)
+            self.scheduled_worker.finished.connect(self.on_scheduled_collection_finished)
+
+            self.scheduled_worker.start()
+
+            # Update UI
+            self.start_scheduled_btn.setEnabled(False)
+            self.stop_scheduled_btn.setEnabled(True)
+            self.collection_status_label.setText("Status: 🟢 Running")
+            self.collection_status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            self.collection_progress_bar.setValue(0)
+
+    def stop_scheduled_collection(self):
+        """Stop scheduled data collection"""
+        if self.scheduled_worker and self.scheduled_worker.isRunning():
+            reply = QMessageBox.question(
+                self, "Stop Collection",
+                "Are you sure you want to stop the scheduled collection?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self.scheduled_worker.stop()
+                self.collection_status_label.setText("Status: ⏹️ Stopping...")
+
+    def on_scheduled_collection_update(self, current, total):
+        """Update progress bar during scheduled collection"""
+        progress = int((current / total) * 100)
+        self.collection_progress_bar.setValue(progress)
+
+    def on_scheduled_collection_finished(self):
+        """Handle scheduled collection completion"""
+        self.start_scheduled_btn.setEnabled(True)
+        self.stop_scheduled_btn.setEnabled(False)
+        self.collection_status_label.setText("Status: ✅ Completed")
+        self.collection_status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+        self.collection_progress_bar.setValue(100)
+        self.refresh_dashboard()
+
+        QMessageBox.information(self, "Complete", "Scheduled data collection completed!")
 
     def apply_styles(self):
         """Apply modern styling to the application"""

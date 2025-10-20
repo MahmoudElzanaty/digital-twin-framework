@@ -39,7 +39,9 @@ class DigitalTwinDatabase:
                 dest_lon REAL NOT NULL,
                 description TEXT,
                 created_at TEXT NOT NULL,
-                active INTEGER DEFAULT 1
+                active INTEGER DEFAULT 1,
+                is_primary INTEGER DEFAULT 0,
+                priority INTEGER DEFAULT 0
             )
         """)
         
@@ -148,28 +150,36 @@ class DigitalTwinDatabase:
         origin_lon: float,
         dest_lat: float,
         dest_lon: float,
-        description: str = ""
+        description: str = "",
+        is_primary: bool = False,
+        priority: int = 0
     ):
         """Add a probe route to monitor"""
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT OR REPLACE INTO probe_routes 
-            (route_id, name, origin_lat, origin_lon, dest_lat, dest_lon, 
-             description, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO probe_routes
+            (route_id, name, origin_lat, origin_lon, dest_lat, dest_lon,
+             description, created_at, is_primary, priority)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (route_id, name, origin_lat, origin_lon, dest_lat, dest_lon,
-              description, datetime.now().isoformat()))
+              description, datetime.now().isoformat(), 1 if is_primary else 0, priority))
         self.conn.commit()
         print(f"[DB] Added probe route: {name}")
     
-    def get_probe_routes(self, active_only: bool = True) -> List[Dict]:
+    def get_probe_routes(self, active_only: bool = True, primary_only: bool = False) -> List[Dict]:
         """Get all probe routes"""
         cursor = self.conn.cursor()
+        query = "SELECT * FROM probe_routes WHERE 1=1"
         if active_only:
-            cursor.execute("SELECT * FROM probe_routes WHERE active = 1")
-        else:
-            cursor.execute("SELECT * FROM probe_routes")
+            query += " AND active = 1"
+        if primary_only:
+            query += " AND is_primary = 1 ORDER BY priority ASC"
+        cursor.execute(query)
         return [dict(row) for row in cursor.fetchall()]
+
+    def get_primary_routes(self) -> List[Dict]:
+        """Get the 5 primary routes for congestion prediction"""
+        return self.get_probe_routes(active_only=True, primary_only=True)
     
     # ========== REAL TRAFFIC DATA ==========
     
