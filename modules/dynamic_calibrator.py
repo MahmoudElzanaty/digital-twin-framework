@@ -162,41 +162,61 @@ class DynamicCalibrator:
     def compute_parameter_gradients(self, current_error: float) -> Dict[str, float]:
         """
         Compute gradients for parameter updates
-        Uses finite differences approximation
+        Uses heuristic rules based on speed differences
+
+        CRITICAL: Gradients represent the DIRECTION to adjust parameters
+        Positive gradient = parameter should INCREASE
+        Negative gradient = parameter should DECREASE
         """
         gradients = {}
-        
-        # If we have enough history, estimate gradients
-        if len(self.error_history) >= 2:
-            prev_error = self.error_history[-2]
-            error_change = current_error - prev_error
-            
-            # Simple gradient estimation
-            # In a full implementation, you'd track parameter changes too
+
+        if self.last_sim_speed and self.last_real_speed:
+            # Speed difference: positive = sim too fast, negative = sim too slow
+            speed_error = self.last_sim_speed - self.last_real_speed
+
+            # Gradient descent formula: new = old - learning_rate * gradient
+            # So POSITIVE gradient → value DECREASES
+            # And NEGATIVE gradient → value INCREASES
+
             for param in self.current_params:
-                # Heuristic gradients based on traffic behavior
                 if param == 'speedFactor':
-                    # If sim too slow, increase speedFactor
-                    if self.last_sim_speed and self.last_real_speed:
-                        speed_diff = self.last_real_speed - self.last_sim_speed
-                        gradients[param] = speed_diff * 0.01  # Scale factor
-                
+                    # speedFactor controls how much vehicles exceed speed limits
+                    # If sim too fast → DECREASE speedFactor → need POSITIVE gradient
+                    # If sim too slow → INCREASE speedFactor → need NEGATIVE gradient
+                    gradients[param] = speed_error * 0.01  # POSITIVE when too fast
+
                 elif param == 'tau':
-                    # If sim too fast (too aggressive), increase tau (more cautious)
-                    if self.last_sim_speed and self.last_real_speed:
-                        speed_diff = self.last_sim_speed - self.last_real_speed
-                        gradients[param] = speed_diff * 0.005
-                
+                    # tau = car-following headway time
+                    # Larger tau = more cautious = slower speeds
+                    # If sim too fast → INCREASE tau → need NEGATIVE gradient
+                    # If sim too slow → DECREASE tau → need POSITIVE gradient
+                    gradients[param] = -speed_error * 0.005  # NEGATIVE when too fast
+
                 elif param == 'accel':
-                    # Adjust acceleration based on speed dynamics
-                    gradients[param] = -error_change * 0.1
-                
+                    # Higher acceleration = can reach higher speeds faster
+                    # If sim too fast → DECREASE accel → need POSITIVE gradient
+                    # If sim too slow → INCREASE accel → need NEGATIVE gradient
+                    gradients[param] = speed_error * 0.05  # POSITIVE when too fast
+
+                elif param == 'decel':
+                    # Higher decel = can brake harder = more conservative = slower
+                    # If sim too fast → INCREASE decel → need NEGATIVE gradient
+                    # If sim too slow → DECREASE decel → need POSITIVE gradient
+                    gradients[param] = -speed_error * 0.03  # NEGATIVE when too fast
+
+                elif param == 'sigma':
+                    # sigma = driver imperfection
+                    # Higher sigma = more random = generally slower
+                    # If sim too fast → INCREASE sigma → need NEGATIVE gradient
+                    # If sim too slow → DECREASE sigma → need POSITIVE gradient
+                    gradients[param] = -speed_error * 0.02  # NEGATIVE when too fast
+
                 else:
                     gradients[param] = 0.0
         else:
-            # Not enough history, use zero gradients
+            # No speed data available, use zero gradients
             gradients = {param: 0.0 for param in self.current_params}
-        
+
         return gradients
     
     def update_parameters(self, gradients: Dict[str, float]) -> Dict[str, float]:

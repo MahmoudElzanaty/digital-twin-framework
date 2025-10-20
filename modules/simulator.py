@@ -10,6 +10,7 @@ from modules.route_tracker import RouteMonitor  # Use FIXED version
 from modules.dynamic_calibrator import DynamicCalibrator  # NEW!
 from modules.database import get_db
 from modules.area_comparison import AreaBasedComparison
+from modules.network_based_route_generator import NetworkBasedRouteGenerator
 
 def create_config(net_file, route_file, cfg_path):
     """Create SUMO configuration file"""
@@ -75,25 +76,52 @@ def run_simulation(
     # Start SUMO
     sumo_binary = "sumo-gui" if gui else "sumo"
     traci.start([sumo_binary, "-c", cfg_file])
-    
+
     step = 0
 
     # Standard traffic logging
     logger = TrafficLogger(log_dir="data/logs", interval=10)
+
+    # NETWORK-BASED ROUTE GENERATION (NEW!)
+    # Generate probe routes from actual SUMO network edges
+    if enable_digital_twin:
+        print("\n[SIMULATOR] 🗺️  Generating probe routes from network...")
+        try:
+            route_gen = NetworkBasedRouteGenerator()
+            if route_gen.initialize_from_network():
+                # Extract location name from scenario_id
+                location_name = scenario_id.split('_')[0] if scenario_id else "simulation"
+
+                # Generate 8 routes based on actual network
+                network_routes = route_gen.generate_network_based_routes(
+                    location_name=location_name,
+                    num_routes=8,
+                    min_route_length=200.0
+                )
+
+                if network_routes:
+                    print(f"[SIMULATOR] ✅ Generated {len(network_routes)} network-based probe routes")
+                else:
+                    print("[SIMULATOR] ⚠️ Could not generate network-based routes")
+            else:
+                print("[SIMULATOR] ⚠️ Network initialization failed")
+
+        except Exception as e:
+            print(f"[SIMULATOR] ⚠️ Route generation error: {e}")
 
     # FIXED ROUTE MONITORING
     route_monitor = None
     if enable_digital_twin:
         try:
             route_monitor = RouteMonitor()
-            
+
             # CRITICAL: Initialize route mappings AFTER SUMO starts
             if not route_monitor.initialize_routes():
                 print("[SIMULATOR] ⚠️ Route monitoring disabled - no routes mapped")
                 route_monitor = None
             else:
                 print(f"[SIMULATOR] ✅ Route monitoring enabled")
-                
+
         except Exception as e:
             print(f"[SIMULATOR] ⚠️ Could not enable route monitoring: {e}")
             route_monitor = None

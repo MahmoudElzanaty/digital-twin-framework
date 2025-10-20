@@ -373,6 +373,14 @@ class MainWindow(QWidget):
         controls_layout.addSpacing(20)
         controls_layout.addWidget(traffic_label)
         controls_layout.addWidget(self.intensity)
+        controls_layout.addSpacing(20)
+
+        # Dynamic Calibration indicator
+        calib_indicator = QLabel("🎯 Dynamic Calibration: ENABLED")
+        calib_indicator.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        calib_indicator.setStyleSheet("color: #4CAF50; padding: 5px; background: #E8F5E9; border-radius: 5px;")
+        controls_layout.addWidget(calib_indicator)
+
         controls_layout.addStretch()
 
         # Run button
@@ -1088,8 +1096,10 @@ class MainWindow(QWidget):
 
             self.log("=" * 60, "INFO")
             self.log("🔬 DIGITAL TWIN MODE ENABLED", "INFO")
+            self.log("🎯 DYNAMIC CALIBRATION ENABLED", "INFO")
             self.log(f"Scenario ID: {scenario_id}", "INFO")
             self.log("Simulation will track routes and compare with real data", "INFO")
+            self.log("Parameters will adapt in real-time to match real traffic", "INFO")
             self.log("=" * 60, "INFO")
 
             self.log("Launching SUMO simulation...", "INFO")
@@ -1097,7 +1107,8 @@ class MainWindow(QWidget):
                 cfg_path,
                 gui=True,
                 scenario_id=scenario_id,
-                enable_digital_twin=True
+                enable_digital_twin=True,
+                enable_dynamic_calibration=True  # ENABLED: Real-time parameter adaptation
             )
 
             self.log("=" * 60, "SUCCESS")

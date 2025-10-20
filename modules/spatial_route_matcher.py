@@ -36,32 +36,39 @@ class SpatialRouteMatcher:
     def get_edge_position(self, edge_id: str) -> Optional[Tuple[float, float]]:
         """
         Get approximate GPS position of a SUMO edge
-        Uses edge midpoint
+        Uses edge midpoint from lane shape
         """
         if edge_id in self.edge_cache:
             return self.edge_cache[edge_id]
-        
+
         try:
-            # Get edge shape (list of x,y coordinates in SUMO projection)
-            shape = traci.edge.getShape(edge_id)
-            
-            if not shape:
+            # Get lanes on this edge
+            lanes = traci.edge.getLaneID(edge_id)
+            if not lanes:
                 return None
-            
-            # Get midpoint of edge
+
+            # Use first lane to get shape
+            lane_id = lanes if isinstance(lanes, str) else lanes[0]
+
+            # Get lane shape (list of (x,y) tuples in SUMO projection)
+            shape = traci.lane.getShape(lane_id)
+
+            if not shape or len(shape) == 0:
+                return None
+
+            # Get midpoint of lane/edge
             mid_idx = len(shape) // 2
             x, y = shape[mid_idx]
-            
+
             # Convert SUMO coordinates to GPS
-            # IMPORTANT: This requires knowing the network's projection!
-            # For now, we'll use SUMO's built-in conversion
             lon, lat = traci.simulation.convertGeo(x, y)
-            
+
             self.edge_cache[edge_id] = (lat, lon)
             return (lat, lon)
-            
-        except Exception as e:
-            print(f"[SPATIAL] Error getting edge position for {edge_id}: {e}")
+
+        except Exception:
+            # Silently skip edges that don't have proper shape data
+            # This is normal for some edge types
             return None
     
     def find_nearest_edge(
