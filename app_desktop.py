@@ -25,6 +25,8 @@ from modules.data_collector import TrafficDataCollector, TrafficDataAnalyzer
 from modules.area_comparison import AreaBasedComparison
 from modules.ai_predictor import SimpleTrafficPredictor, AdaptivePredictor
 from modules.calibrator import SUMOCalibrator
+from modules.area_manager import AreaManager
+from modules.area_wide_collector import AreaWideCollector
 
 
 # ============== WORKER THREADS ==============
@@ -169,6 +171,55 @@ class ScheduledCollectionWorker(QThread):
         """Stop the collection"""
         self.running = False
 
+class AreaTrainingWorker(QThread):
+    """Background thread for area-wide training data collection"""
+    progress = pyqtSignal(str)
+    collection_update = pyqtSignal(int, int, dict)  # (current, total, snapshot_data)
+    finished = pyqtSignal()
+
+    def __init__(self, api_key, area_id, duration_days, interval_minutes=15, grid_size=5):
+        super().__init__()
+        self.api_key = api_key
+        self.area_id = area_id
+        self.duration_days = duration_days
+        self.interval_minutes = interval_minutes
+        self.grid_size = grid_size
+        self.running = True
+
+    def run(self):
+        try:
+            # Initialize collector
+            collector = AreaWideCollector(self.api_key, self.area_id, grid_size=self.grid_size)
+
+            # Progress callback
+            def progress_callback(current, total, snapshot):
+                if self.running:
+                    self.collection_update.emit(current, total, snapshot)
+                    self.progress.emit(f"Collection {current}/{total} complete")
+
+            # Start collection
+            self.progress.emit(f"Starting {self.duration_days}-day training data collection...")
+            collector.collect_training_data(
+                duration_days=self.duration_days,
+                interval_minutes=self.interval_minutes,
+                progress_callback=progress_callback
+            )
+
+            if self.running:
+                self.progress.emit("Training data collection completed!")
+            else:
+                self.progress.emit("Training data collection stopped by user")
+
+            self.finished.emit()
+
+        except Exception as e:
+            self.progress.emit(f"Error: {str(e)}")
+            self.finished.emit()
+
+    def stop(self):
+        """Stop the collection"""
+        self.running = False
+
 class MapBridge(QObject):
     """Bridge for JavaScript to Python communication"""
     regionSelected = pyqtSignal(str)  # emits JSON coords
@@ -188,10 +239,17 @@ class MainWindow(QWidget):
         # Initialize database and API
         self.db = get_db()
         self.api_key = self.load_api_key()
-        
+
+        # Initialize area manager
+        self.area_manager = AreaManager()
+        self.area_training_worker = None
+        self.current_area_id = None
+
         # Map and simulation state (ORIGINAL)
         self.map_file = "map.html"
+        self.area_map_file = "area_map.html"
         self.selected_bbox = None
+        self.area_selected_bbox = None  # Separate bbox for area training tab
         self.current_location = None
         
         # Setup UI with tabs
@@ -206,9 +264,20 @@ class MainWindow(QWidget):
         self.bridge.regionSelected.connect(self.on_region_selected)
         self.view.loadFinished.connect(self.on_map_loaded)
         self.init_map([30.0444, 31.2357], 12)
-        
+
         print("[DEBUG] Bridge and channel initialized")
-        
+
+        # Initialize area training map
+        self.area_bridge = MapBridge()
+        self.area_channel = QWebChannel()
+        self.area_channel.registerObject("bridge", self.area_bridge)
+        self.area_map_view.page().setWebChannel(self.area_channel)
+        self.area_bridge.regionSelected.connect(self.on_area_region_selected)
+        self.area_map_view.loadFinished.connect(self.on_area_map_loaded)
+        self.init_area_map([30.0444, 31.2357], 12)
+
+        print("[DEBUG] Area training bridge and channel initialized")
+
         # Load initial dashboard data
         self.refresh_dashboard()
 
@@ -252,19 +321,23 @@ class MainWindow(QWidget):
         self.tab_routes = self.create_route_selection_tab()
         self.tabs.addTab(self.tab_routes, "🛣️ Route Selection (5 Routes)")
 
-        # Tab 3: Digital Twin Dashboard (NEW)
+        # Tab 3: Area Training (NEW - AREA-BASED WORKFLOW)
+        self.tab_area_training = self.create_area_training_tab()
+        self.tabs.addTab(self.tab_area_training, "🌐 Area Training")
+
+        # Tab 4: Digital Twin Dashboard (NEW)
         self.tab_dashboard = self.create_dashboard_tab()
         self.tabs.addTab(self.tab_dashboard, "📊 Digital Twin Dashboard")
 
-        # Tab 4: Calibration Center (NEW)
+        # Tab 5: Calibration Center (NEW)
         self.tab_calibration = self.create_calibration_tab()
         self.tabs.addTab(self.tab_calibration, "🔧 Calibration Center")
-        
-        # Tab 5: AI Prediction (NEW)
+
+        # Tab 6: AI Prediction (NEW)
         self.tab_ai = self.create_ai_tab()
         self.tabs.addTab(self.tab_ai, "🤖 AI Prediction")
 
-        # Tab 6: Results & Analysis (NEW)
+        # Tab 7: Results & Analysis (NEW)
         self.tab_results = self.create_results_tab()
         self.tabs.addTab(self.tab_results, "📈 Results & Analysis")
         
@@ -709,13 +782,258 @@ class MainWindow(QWidget):
 
         return card
 
-    # ============== TAB 3: DIGITAL TWIN DASHBOARD ==============
-    
+    # ============== TAB 3: AREA TRAINING ==============
+
+    def create_area_training_tab(self):
+        """Create area training tab for area-based workflow"""
+        from PyQt6.QtWidgets import QScrollArea
+
+        tab = QWidget()
+        main_layout = QVBoxLayout(tab)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Container widget for scrollable content
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # Info section
+        info_label = QLabel(
+            "🌐 Area-Based Training Workflow\n"
+            "1. Select a fixed area on the map (Tab 1)\n"
+            "2. Create a monitored area with SUMO network\n"
+            "3. Collect training data for weeks/months\n"
+            "4. Pick ANY 5 routes within the area for prediction"
+        )
+        info_label.setWordWrap(True)
+        info_label.setFont(QFont("Segoe UI", 10))
+        info_label.setStyleSheet("background-color: #e3f2fd; padding: 15px; border-radius: 5px;")
+        layout.addWidget(info_label)
+
+        # Step 1: Area Creation
+        area_create_group = QGroupBox("Step 1: Create Monitored Area")
+        area_create_group.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        area_create_layout = QVBoxLayout(area_create_group)
+
+        # Area name
+        name_layout = QHBoxLayout()
+        name_layout.addWidget(QLabel("Area Name:"))
+        self.area_name_input = QLineEdit()
+        self.area_name_input.setPlaceholderText("e.g., Downtown Cairo, New Cairo District")
+        name_layout.addWidget(self.area_name_input)
+        area_create_layout.addLayout(name_layout)
+
+        # Grid size for sampling
+        grid_layout = QHBoxLayout()
+        grid_layout.addWidget(QLabel("Sampling Grid Size:"))
+        self.grid_size_spin = QSpinBox()
+        self.grid_size_spin.setRange(3, 10)
+        self.grid_size_spin.setValue(5)
+        self.grid_size_spin.setToolTip("NxN grid for area sampling. 5x5 = 25 points, 40 routes")
+        grid_layout.addWidget(self.grid_size_spin)
+        grid_layout.addWidget(QLabel("x"))
+        self.grid_size_label = QLabel("5 (25 points, 40 routes)")
+        self.grid_size_spin.valueChanged.connect(self.update_grid_info)
+        grid_layout.addWidget(self.grid_size_label)
+        grid_layout.addStretch()
+        area_create_layout.addLayout(grid_layout)
+
+        # Build network checkbox
+        self.build_network_check = QCheckBox("Build SUMO network from OpenStreetMap")
+        self.build_network_check.setChecked(True)
+        area_create_layout.addWidget(self.build_network_check)
+
+        # Map selector section
+        map_selector_label = QLabel("Select area on map:")
+        map_selector_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        area_create_layout.addWidget(map_selector_label)
+
+        # Map instructions
+        map_instructions = QLabel("Use the rectangle tool (▢) on the left side of the map to select your desired area")
+        map_instructions.setFont(QFont("Segoe UI", 9))
+        map_instructions.setStyleSheet("color: #666; padding: 5px;")
+        area_create_layout.addWidget(map_instructions)
+
+        # Create map view for area training
+        self.area_map_view = QWebEngineView()
+        self.area_map_view.setMinimumHeight(400)
+
+        # Enable settings
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+        area_settings = self.area_map_view.settings()
+        area_settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        area_settings.setAttribute(QWebEngineSettings.WebAttribute.ErrorPageEnabled, True)
+        area_settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+
+        # Connect console messages for debugging
+        self.area_map_view.page().javaScriptConsoleMessage = self.handle_js_console_message
+
+        area_create_layout.addWidget(self.area_map_view)
+
+        # Current selection status
+        self.area_bbox_label = QLabel("No area selected")
+        self.area_bbox_label.setStyleSheet("color: #666; font-style: italic;")
+        area_create_layout.addWidget(self.area_bbox_label)
+
+        # Create area button
+        create_area_btn_layout = QHBoxLayout()
+        self.create_area_btn = QPushButton("Create Monitored Area")
+        self.create_area_btn.clicked.connect(self.create_monitored_area)
+        self.create_area_btn.setStyleSheet("background-color: #4CAF50; padding: 10px;")
+        create_area_btn_layout.addWidget(self.create_area_btn)
+
+        self.load_area_btn = QPushButton("Load Existing Area")
+        self.load_area_btn.clicked.connect(self.load_existing_area)
+        create_area_btn_layout.addWidget(self.load_area_btn)
+        create_area_btn_layout.addStretch()
+
+        area_create_layout.addLayout(create_area_btn_layout)
+
+        layout.addWidget(area_create_group)
+
+        # Step 2: Training Data Collection
+        training_group = QGroupBox("Step 2: Collect Training Data")
+        training_group.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        training_layout = QVBoxLayout(training_group)
+
+        # Current area info
+        self.training_area_info = QLabel("No area selected")
+        self.training_area_info.setStyleSheet("font-weight: bold; color: #666;")
+        training_layout.addWidget(self.training_area_info)
+
+        # Training duration with flexible units
+        duration_layout = QHBoxLayout()
+        duration_layout.addWidget(QLabel("Training Duration:"))
+
+        self.training_duration_spin = QSpinBox()
+        self.training_duration_spin.setRange(1, 1000)
+        self.training_duration_spin.setValue(2)
+        self.training_duration_spin.setMinimumWidth(80)
+        duration_layout.addWidget(self.training_duration_spin)
+
+        self.training_duration_unit = QComboBox()
+        self.training_duration_unit.addItems(["Minutes", "Hours", "Days", "Weeks"])
+        self.training_duration_unit.setCurrentText("Weeks")
+        self.training_duration_unit.setMinimumWidth(100)
+        duration_layout.addWidget(self.training_duration_unit)
+
+        duration_layout.addSpacing(20)
+        duration_layout.addWidget(QLabel("Collection Interval:"))
+
+        self.training_interval_spin = QSpinBox()
+        self.training_interval_spin.setRange(1, 1000)
+        self.training_interval_spin.setValue(15)
+        self.training_interval_spin.setMinimumWidth(80)
+        duration_layout.addWidget(self.training_interval_spin)
+
+        self.training_interval_unit = QComboBox()
+        self.training_interval_unit.addItems(["Minutes", "Hours"])
+        self.training_interval_unit.setCurrentText("Minutes")
+        self.training_interval_unit.setMinimumWidth(100)
+        duration_layout.addWidget(self.training_interval_unit)
+
+        duration_layout.addStretch()
+        training_layout.addLayout(duration_layout)
+
+        # Expected collections info
+        self.collections_info_label = QLabel("")
+        self.collections_info_label.setStyleSheet("color: #666; font-size: 9pt;")
+        self.training_duration_spin.valueChanged.connect(self.update_collections_info)
+        self.training_duration_unit.currentTextChanged.connect(self.update_collections_info)
+        self.training_interval_spin.valueChanged.connect(self.update_collections_info)
+        self.training_interval_unit.currentTextChanged.connect(self.update_collections_info)
+        training_layout.addWidget(self.collections_info_label)
+        self.update_collections_info()
+
+        # Training controls
+        training_btn_layout = QHBoxLayout()
+        self.start_training_btn = QPushButton("Start Training Data Collection")
+        self.start_training_btn.clicked.connect(self.start_area_training)
+        self.start_training_btn.setEnabled(False)
+        self.start_training_btn.setStyleSheet("background-color: #4CAF50; padding: 10px;")
+        training_btn_layout.addWidget(self.start_training_btn)
+
+        self.stop_training_btn = QPushButton("Stop Collection")
+        self.stop_training_btn.clicked.connect(self.stop_area_training)
+        self.stop_training_btn.setEnabled(False)
+        self.stop_training_btn.setStyleSheet("background-color: #f44336; padding: 10px;")
+        training_btn_layout.addWidget(self.stop_training_btn)
+        training_btn_layout.addStretch()
+        training_layout.addLayout(training_btn_layout)
+
+        # Progress
+        self.training_progress_bar = QProgressBar()
+        self.training_progress_bar.setValue(0)
+        training_layout.addWidget(self.training_progress_bar)
+
+        self.training_status_label = QLabel("Status: Ready")
+        self.training_status_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        training_layout.addWidget(self.training_status_label)
+
+        # Latest snapshot info
+        self.snapshot_info_label = QLabel("")
+        self.snapshot_info_label.setStyleSheet("color: #666; font-size: 9pt;")
+        training_layout.addWidget(self.snapshot_info_label)
+
+        layout.addWidget(training_group)
+
+        # Step 3: Area Status & Statistics
+        status_group = QGroupBox("Step 3: Area Status & Statistics")
+        status_group.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        status_layout = QVBoxLayout(status_group)
+
+        # Statistics table
+        self.area_stats_table = QTableWidget()
+        self.area_stats_table.setColumnCount(2)
+        self.area_stats_table.setHorizontalHeaderLabels(["Metric", "Value"])
+        self.area_stats_table.horizontalHeader().setStretchLastSection(True)
+        self.area_stats_table.setMaximumHeight(200)
+        status_layout.addWidget(self.area_stats_table)
+
+        # Refresh button
+        refresh_btn = QPushButton("Refresh Statistics")
+        refresh_btn.clicked.connect(self.refresh_area_stats)
+        status_layout.addWidget(refresh_btn)
+
+        layout.addWidget(status_group)
+
+        layout.addStretch()
+
+        # Set the scroll content
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
+
+        return tab
+
+    # ============== TAB 4: DIGITAL TWIN DASHBOARD ==============
+
     def create_dashboard_tab(self):
         """Create digital twin dashboard"""
+        from PyQt6.QtWidgets import QScrollArea
+
         tab = QWidget()
-        layout = QVBoxLayout(tab)
-        
+        main_layout = QVBoxLayout(tab)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Container widget for scrollable content
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+
         # Data collection section
         collection_group = QGroupBox("📡 Real-World Data Collection")
         collection_layout = QVBoxLayout(collection_group)
@@ -785,15 +1103,34 @@ class MainWindow(QWidget):
         routes_layout.addWidget(self.routes_table)
         
         layout.addWidget(routes_group)
-        
+
+        # Set the scroll content
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
+
         return tab
 
-    # ============== TAB 3: CALIBRATION CENTER ==============
-    
+    # ============== TAB 5: CALIBRATION CENTER ==============
+
     def create_calibration_tab(self):
         """Create calibration center tab"""
+        from PyQt6.QtWidgets import QScrollArea
+
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        main_layout = QVBoxLayout(tab)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Container widget for scrollable content
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
         
         # Calibration info
         info_label = QLabel(
@@ -877,15 +1214,34 @@ class MainWindow(QWidget):
         results_layout.addWidget(self.calib_results)
         
         layout.addWidget(results_group)
-        
+
+        # Set the scroll content
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
+
         return tab
 
-    # ============== TAB 4: AI PREDICTION ==============
-    
+    # ============== TAB 6: AI PREDICTION ==============
+
     def create_ai_tab(self):
         """Create AI prediction tab"""
+        from PyQt6.QtWidgets import QScrollArea
+
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        main_layout = QVBoxLayout(tab)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Container widget for scrollable content
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
         
         # Info
         info_label = QLabel(
@@ -951,15 +1307,34 @@ class MainWindow(QWidget):
         prediction_layout.addWidget(self.predictions_table)
         
         layout.addWidget(prediction_group)
-        
+
+        # Set the scroll content
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
+
         return tab
 
-    # ============== TAB 5: RESULTS & ANALYSIS ==============
-    
+    # ============== TAB 7: RESULTS & ANALYSIS ==============
+
     def create_results_tab(self):
         """Create results and analysis tab"""
+        from PyQt6.QtWidgets import QScrollArea
+
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        main_layout = QVBoxLayout(tab)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Container widget for scrollable content
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
         
         # Scenarios section
         scenarios_group = QGroupBox("🔍 Simulation Scenarios")
@@ -1001,7 +1376,11 @@ class MainWindow(QWidget):
         comparison_layout.addWidget(self.comparison_text)
         
         layout.addWidget(comparison_group)
-        
+
+        # Set the scroll content
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
+
         return tab
 
     # ============== ORIGINAL MAP FUNCTIONS (UNTOUCHED) ==============
@@ -1343,6 +1722,239 @@ class MainWindow(QWidget):
                 self.init_map([geo.latitude, geo.longitude], 13)
         else:
             self.init_map([30.0444, 31.2357], 12)
+
+    # ============== AREA TRAINING MAP FUNCTIONS ==============
+
+    def init_area_map(self, center, zoom):
+        """Initialize the area training map with drawing tools - EXACT COPY FROM TAB 1"""
+        m = folium.Map(
+            location=center,
+            zoom_start=zoom,
+            tiles='OpenStreetMap',
+            control_scale=True
+        )
+
+        # Add draw control with rectangle only for area selection
+        draw = plugins.Draw(
+            export=True,
+            position='topleft',
+            draw_options={
+                'polyline': False,
+                'polygon': False,
+                'circle': False,
+                'marker': False,
+                'circlemarker': False,
+                'rectangle': {
+                    'shapeOptions': {
+                        'color': '#4CAF50',
+                        'weight': 3,
+                        'fillOpacity': 0.2
+                    }
+                }
+            }
+        )
+        draw.add_to(m)
+
+        # Add JavaScript to capture drawn rectangle using QWebChannel - EXACT COPY FROM TAB 1
+        js_code = """
+        <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+        <script>
+        (function() {
+            console.log('[INIT] Starting initialization...');
+            var bridgeObj = null;
+
+            // Initialize QWebChannel immediately
+            function initBridge() {
+                if (typeof qt === 'undefined' || !qt.webChannelTransport) {
+                    console.error('[ERROR] Qt WebChannel not available!');
+                    return false;
+                }
+
+                console.log('[INIT] Creating QWebChannel...');
+                new QWebChannel(qt.webChannelTransport, function(channel) {
+                    bridgeObj = channel.objects.bridge;
+                    console.log('[SUCCESS] Bridge connected!', bridgeObj);
+
+                    if (bridgeObj && typeof bridgeObj.receiveRegion === 'function') {
+                        console.log('[SUCCESS] bridge.receiveRegion is available');
+                    } else {
+                        console.error('[ERROR] bridge.receiveRegion not found!');
+                    }
+
+                    attachMapListener();
+                });
+                return true;
+            }
+
+            function attachMapListener() {
+                console.log('[INIT] Waiting for map object...');
+
+                var attempts = 0;
+                var maxAttempts = 100;
+
+                var checkMap = setInterval(function() {
+                    attempts++;
+
+                    if (typeof map !== 'undefined' && map) {
+                        clearInterval(checkMap);
+                        console.log('[SUCCESS] Map object found!');
+
+                        map.on('draw:created', function(e) {
+                            console.log('[EVENT] Rectangle drawn!');
+
+                            try {
+                                var layer = e.layer;
+                                var bounds = layer.getBounds();
+
+                                var data = {
+                                    north: bounds.getNorth(),
+                                    south: bounds.getSouth(),
+                                    east: bounds.getEast(),
+                                    west: bounds.getWest()
+                                };
+
+                                console.log('[DATA] Bounds:', JSON.stringify(data, null, 2));
+
+                                if (bridgeObj && typeof bridgeObj.receiveRegion === 'function') {
+                                    console.log('[SEND] Calling bridge.receiveRegion...');
+                                    bridgeObj.receiveRegion(JSON.stringify(data));
+                                    console.log('[SEND] Data sent successfully!');
+                                } else {
+                                    console.error('[ERROR] Bridge not ready or method missing!');
+                                    alert('Connection error! Please restart the application.');
+                                }
+                            } catch (error) {
+                                console.error('[ERROR] Exception:', error);
+                                alert('Error processing selection: ' + error.message);
+                            }
+                        });
+
+                        console.log('[SUCCESS] Draw listener attached!');
+
+                    } else if (attempts >= maxAttempts) {
+                        clearInterval(checkMap);
+                        console.error('[ERROR] Map object not found after ' + maxAttempts + ' attempts');
+                    }
+                }, 50);
+            }
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', function() {
+                    console.log('[INIT] DOM ready');
+                    initBridge();
+                });
+            } else {
+                console.log('[INIT] DOM already ready');
+                initBridge();
+            }
+        })();
+        </script>
+        """
+
+        m.get_root().html.add_child(folium.Element(js_code))
+
+        folium.LayerControl().add_to(m)
+
+        map_path = os.path.abspath(self.area_map_file)
+        m.save(map_path)
+
+        print(f"[DEBUG] Area map saved to: {map_path}")
+        print(f"[DEBUG] File exists: {os.path.exists(map_path)}")
+
+        file_url = QUrl.fromLocalFile(map_path)
+        print(f"[DEBUG] Loading URL: {file_url.toString()}")
+
+        self.area_map_view.setUrl(file_url)
+
+    def on_area_map_loaded(self, ok):
+        """Called when area training map finishes loading - EXACT COPY FROM TAB 1"""
+        if ok:
+            print("[DEBUG] Area map loaded successfully")
+            print("[DEBUG] Injecting listener code...")
+
+            inject_code = """
+            (function() {
+                console.log('[INJECT] Running injected code...');
+
+                function findMapVariable() {
+                    for (var key in window) {
+                        if (key.startsWith('map_') && window[key] && typeof window[key].on === 'function') {
+                            return window[key];
+                        }
+                    }
+                    return null;
+                }
+
+                var attempts = 0;
+                var checkReady = setInterval(function() {
+                    attempts++;
+                    var mapObj = findMapVariable();
+
+                    if (mapObj && typeof QWebChannel !== 'undefined' && typeof qt !== 'undefined') {
+                        clearInterval(checkReady);
+                        console.log('[INJECT] Map and QWebChannel ready! Attempts:', attempts);
+
+                        new QWebChannel(qt.webChannelTransport, function(channel) {
+                            var bridge = channel.objects.bridge;
+                            console.log('[INJECT] Bridge obtained:', bridge);
+
+                            mapObj.on('draw:created', function(e) {
+                                console.log('[INJECT] Draw event fired!');
+                                var bounds = e.layer.getBounds();
+                                var data = JSON.stringify({
+                                    north: bounds.getNorth(),
+                                    south: bounds.getSouth(),
+                                    east: bounds.getEast(),
+                                    west: bounds.getWest()
+                                });
+                                console.log('[INJECT] Data:', data);
+                                console.log('[INJECT] Calling bridge.receiveRegion...');
+                                bridge.receiveRegion(data);
+                                console.log('[INJECT] Done!');
+                            });
+
+                            console.log('[INJECT] Setup complete! Listener attached to map.');
+                        });
+                    } else if (attempts > 100) {
+                        clearInterval(checkReady);
+                        console.error('[INJECT] Failed to initialize after 100 attempts');
+                        console.error('[INJECT] mapObj:', mapObj, 'QWebChannel:', typeof QWebChannel, 'qt:', typeof qt);
+                    }
+                }, 100);
+            })();
+            """
+
+            self.area_map_view.page().runJavaScript(inject_code)
+            print("[DEBUG] JavaScript injected")
+        else:
+            print("[DEBUG] Area map failed to load")
+
+    def on_area_region_selected(self, data):
+        """Handle region selection from area training map"""
+        print(f"[DEBUG] on_area_region_selected called with data: {data}")
+        try:
+            coords = json.loads(data)
+            self.area_selected_bbox = coords
+            print(f"[DEBUG] Parsed area coordinates: {coords}")
+
+            # Calculate approximate area
+            lat_diff = abs(coords['north'] - coords['south'])
+            lon_diff = abs(coords['east'] - coords['west'])
+            area_km2 = lat_diff * lon_diff * 111 * 111
+
+            self.area_bbox_label.setText(
+                f"Area selected: {area_km2:.2f} km²\n"
+                f"Bounds: ({coords['south']:.4f}, {coords['west']:.4f}) to "
+                f"({coords['north']:.4f}, {coords['east']:.4f})"
+            )
+            self.area_bbox_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+
+            print(f"[DEBUG] Area map selection complete")
+
+        except Exception as e:
+            print(f"[DEBUG] Exception in on_area_region_selected: {e}")
+            import traceback
+            traceback.print_exc()
 
     def on_run(self):
         """Run the simulation with Digital Twin integration"""
@@ -2064,6 +2676,322 @@ class MainWindow(QWidget):
         self.refresh_dashboard()
 
         QMessageBox.information(self, "Complete", "Scheduled data collection completed!")
+
+    # ============== AREA TRAINING EVENT HANDLERS ==============
+
+    def update_grid_info(self):
+        """Update grid size info label"""
+        n = self.grid_size_spin.value()
+        points = n * n
+        routes = 2 * n * (n - 1)  # horizontal + vertical connections
+        self.grid_size_label.setText(f"{n} ({points} points, {routes} routes)")
+
+    def update_collections_info(self):
+        """Update expected collections info with flexible units"""
+        # Convert duration to minutes
+        duration_value = self.training_duration_spin.value()
+        duration_unit = self.training_duration_unit.currentText()
+
+        if duration_unit == "Minutes":
+            total_duration_minutes = duration_value
+        elif duration_unit == "Hours":
+            total_duration_minutes = duration_value * 60
+        elif duration_unit == "Days":
+            total_duration_minutes = duration_value * 24 * 60
+        else:  # Weeks
+            total_duration_minutes = duration_value * 7 * 24 * 60
+
+        # Convert interval to minutes
+        interval_value = self.training_interval_spin.value()
+        interval_unit = self.training_interval_unit.currentText()
+
+        if interval_unit == "Minutes":
+            interval_minutes = interval_value
+        else:  # Hours
+            interval_minutes = interval_value * 60
+
+        # Calculate collections
+        if interval_minutes > 0:
+            total_collections = total_duration_minutes // interval_minutes
+        else:
+            total_collections = 0
+
+        # Calculate duration in days for display
+        duration_days = total_duration_minutes / (24 * 60)
+
+        self.collections_info_label.setText(
+            f"Expected: {total_collections:,} collections over {duration_days:.2f} days "
+            f"(~{total_collections/max(duration_days, 1):.0f} per day)"
+        )
+
+    def create_monitored_area(self):
+        """Create a new monitored area from map selection"""
+        if not self.area_selected_bbox:
+            QMessageBox.warning(
+                self, "No Area Selected",
+                "Please select an area on the map above!\n"
+                "Use the rectangle tool to draw an area."
+            )
+            return
+
+        area_name = self.area_name_input.text().strip()
+        if not area_name:
+            QMessageBox.warning(self, "Missing Name", "Please enter a name for the area!")
+            return
+
+        try:
+            # Create area
+            build_network = self.build_network_check.isChecked()
+            grid_size = self.grid_size_spin.value()
+
+            self.create_area_btn.setEnabled(False)
+            self.create_area_btn.setText("Creating area...")
+
+            result = self.area_manager.create_area_from_bbox(
+                area_name=area_name,
+                bbox=self.area_selected_bbox,
+                build_network=build_network
+            )
+
+            self.current_area_id = result['area_id']
+
+            # Calculate grid info for display
+            grid_points = grid_size * grid_size
+            grid_routes = 2 * grid_size * (grid_size - 1)
+
+            # Update UI
+            self.area_bbox_label.setText(
+                f"Area created: {result['area_id']}\n"
+                f"Network: {os.path.basename(result['network_file']) if result['network_file'] else 'Not built'}\n"
+                f"Grid: {grid_size}x{grid_size} ({grid_points} points, {grid_routes} routes)"
+            )
+            self.area_bbox_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+
+            self.training_area_info.setText(
+                f"Area: {area_name} (ID: {result['area_id']})"
+            )
+            self.training_area_info.setStyleSheet("font-weight: bold; color: #4CAF50;")
+
+            self.start_training_btn.setEnabled(True)
+
+            QMessageBox.information(
+                self, "Success",
+                f"Monitored area created successfully!\n\n"
+                f"Area ID: {result['area_id']}\n"
+                f"Sampling Grid: {grid_size}x{grid_size}\n"
+                f"Network: {'Built' if build_network else 'Skipped'}\n\n"
+                f"You can now start training data collection."
+            )
+
+            self.refresh_area_stats()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to create area: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.create_area_btn.setEnabled(True)
+            self.create_area_btn.setText("Create Monitored Area")
+
+    def load_existing_area(self):
+        """Load an existing monitored area"""
+        try:
+            # Get all areas
+            cursor = self.db.conn.cursor()
+            cursor.execute("SELECT area_id, name, status FROM monitored_areas ORDER BY created_at DESC")
+            areas = cursor.fetchall()
+
+            if not areas:
+                QMessageBox.information(self, "No Areas", "No monitored areas found in database.")
+                return
+
+            # Create selection dialog
+            items = [f"{a['name']} (ID: {a['area_id']}, Status: {a['status']})" for a in areas]
+            item, ok = QInputDialog.getItem(
+                self, "Load Area", "Select an area:", items, 0, False
+            )
+
+            if ok and item:
+                # Extract area_id from selection
+                selected_index = items.index(item)
+                area_id = areas[selected_index]['area_id']
+
+                # Load area
+                area = self.db.get_monitored_area(area_id)
+                if area:
+                    self.current_area_id = area_id
+                    self.area_name_input.setText(area['name'])
+
+                    self.area_bbox_label.setText(
+                        f"Area loaded: {area['area_id']}\n"
+                        f"Status: {area['status']}\n"
+                        f"Collections: {area.get('collections_completed', 0)}/{area.get('collections_target', 0)}"
+                    )
+                    self.area_bbox_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+
+                    self.training_area_info.setText(
+                        f"Area: {area['name']} (ID: {area_id})"
+                    )
+                    self.training_area_info.setStyleSheet("font-weight: bold; color: #4CAF50;")
+
+                    self.start_training_btn.setEnabled(area['status'] != 'completed')
+
+                    self.refresh_area_stats()
+
+                    QMessageBox.information(self, "Success", f"Area '{area['name']}' loaded successfully!")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load area: {str(e)}")
+
+    def start_area_training(self):
+        """Start area-wide training data collection"""
+        if not self.current_area_id:
+            QMessageBox.warning(self, "No Area", "Please create or load an area first!")
+            return
+
+        if not self.api_key:
+            QMessageBox.warning(
+                self, "API Key Required",
+                "Please configure API key in the Digital Twin Dashboard tab first!"
+            )
+            return
+
+        # Convert duration to minutes
+        duration_value = self.training_duration_spin.value()
+        duration_unit = self.training_duration_unit.currentText()
+
+        if duration_unit == "Minutes":
+            total_duration_minutes = duration_value
+        elif duration_unit == "Hours":
+            total_duration_minutes = duration_value * 60
+        elif duration_unit == "Days":
+            total_duration_minutes = duration_value * 24 * 60
+        else:  # Weeks
+            total_duration_minutes = duration_value * 7 * 24 * 60
+
+        # Convert interval to minutes
+        interval_value = self.training_interval_spin.value()
+        interval_unit = self.training_interval_unit.currentText()
+
+        if interval_unit == "Minutes":
+            interval_minutes = interval_value
+        else:  # Hours
+            interval_minutes = interval_value * 60
+
+        # Calculate days for display and storage
+        duration_days = total_duration_minutes / (24 * 60)
+        duration_weeks = duration_days / 7
+
+        reply = QMessageBox.question(
+            self, "Start Training",
+            f"Start area-wide training data collection?\n\n"
+            f"Duration: {duration_value} {duration_unit.lower()} ({duration_days:.2f} days)\n"
+            f"Interval: Every {interval_value} {interval_unit.lower()}\n\n"
+            f"This will run in the background and collect traffic data "
+            f"across the entire area using the sampling grid.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                # Start training lifecycle in area manager
+                self.area_manager.start_area_training(
+                    area_id=self.current_area_id,
+                    duration_weeks=duration_weeks,
+                    interval_minutes=interval_minutes
+                )
+
+                # Start worker thread
+                grid_size = self.grid_size_spin.value()
+                self.area_training_worker = AreaTrainingWorker(
+                    self.api_key,
+                    self.current_area_id,
+                    duration_days,
+                    interval_minutes,
+                    grid_size
+                )
+
+                self.area_training_worker.progress.connect(self.training_status_label.setText)
+                self.area_training_worker.collection_update.connect(self.on_training_update)
+                self.area_training_worker.finished.connect(self.on_training_finished)
+
+                self.area_training_worker.start()
+
+                # Update UI
+                self.start_training_btn.setEnabled(False)
+                self.stop_training_btn.setEnabled(True)
+                self.training_status_label.setText("Status: Running")
+                self.training_status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to start training: {str(e)}")
+
+    def stop_area_training(self):
+        """Stop area training"""
+        if self.area_training_worker and self.area_training_worker.isRunning():
+            reply = QMessageBox.question(
+                self, "Stop Training",
+                "Are you sure you want to stop training data collection?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self.area_training_worker.stop()
+                self.training_status_label.setText("Status: Stopping...")
+
+    def on_training_update(self, current, total, snapshot):
+        """Handle training progress update"""
+        progress = int((current / total) * 100)
+        self.training_progress_bar.setValue(progress)
+
+        # Update snapshot info
+        if snapshot:
+            self.snapshot_info_label.setText(
+                f"Latest snapshot: {snapshot.get('num_samples', 0)} samples, "
+                f"Avg speed: {snapshot.get('avg_speed_kmh', 0):.1f} km/h"
+            )
+
+        self.refresh_area_stats()
+
+    def on_training_finished(self):
+        """Handle training completion"""
+        self.start_training_btn.setEnabled(True)
+        self.stop_training_btn.setEnabled(False)
+        self.training_status_label.setText("Status: Completed")
+        self.training_status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+        self.training_progress_bar.setValue(100)
+
+        self.refresh_area_stats()
+
+        QMessageBox.information(self, "Complete", "Training data collection completed!")
+
+    def refresh_area_stats(self):
+        """Refresh area statistics"""
+        if not self.current_area_id:
+            self.area_stats_table.setRowCount(0)
+            return
+
+        try:
+            area = self.db.get_monitored_area(self.current_area_id)
+
+            if area:
+                stats_data = [
+                    ("Area ID", area['area_id']),
+                    ("Area Name", area['name']),
+                    ("Status", area['status']),
+                    ("Collections Completed", f"{area.get('collections_completed', 0)}/{area.get('collections_target', 0) or 'N/A'}"),
+                    ("Training Duration", f"{area.get('training_duration_days', 0)} days" if area.get('training_duration_days') else "Not started"),
+                    ("Training Started", area.get('training_start_date', 'N/A')[:19] if area.get('training_start_date') else "N/A"),
+                    ("Network File", os.path.basename(area['sumo_network_file']) if area.get('sumo_network_file') else "Not built"),
+                ]
+
+                self.area_stats_table.setRowCount(len(stats_data))
+                for i, (metric, value) in enumerate(stats_data):
+                    self.area_stats_table.setItem(i, 0, QTableWidgetItem(metric))
+                    self.area_stats_table.setItem(i, 1, QTableWidgetItem(str(value)))
+
+        except Exception as e:
+            print(f"Error refreshing area stats: {e}")
 
     def apply_styles(self):
         """Apply modern styling to the application"""
