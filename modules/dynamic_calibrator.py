@@ -15,36 +15,47 @@ class DynamicCalibrator:
     Real-time calibration that adjusts parameters during simulation
     Uses online learning to minimize error continuously
     """
-    
+
     def __init__(
         self,
         update_interval: int = 300,  # Adjust every 300 simulation steps (5 min)
         learning_rate: float = 0.1,   # How aggressively to adjust
-        window_size: int = 10         # Keep last N measurements
+        window_size: int = 10,        # Keep last N measurements
+        scenario_id: str = None,      # Scenario ID for area-specific data
+        initial_params: Dict[str, float] = None  # Initial parameters from traffic configurator
     ):
         self.db = get_db()
         self.comparison = AreaBasedComparison(self.db)
-        
+        self.scenario_id = scenario_id
+
         self.update_interval = update_interval
         self.learning_rate = learning_rate
         self.window_size = window_size
+
+        # Current parameters (use provided initial params or defaults)
+        if initial_params:
+            self.current_params = initial_params.copy()
+            print(f"[DYNAMIC_CALIB] Starting with configured parameters:")
+            print(f"[DYNAMIC_CALIB]   tau: {self.current_params['tau']:.2f}")
+            print(f"[DYNAMIC_CALIB]   speedFactor: {self.current_params['speedFactor']:.2f}")
+            print(f"[DYNAMIC_CALIB]   sigma: {self.current_params['sigma']:.2f}")
+        else:
+            # Fallback to defaults
+            self.current_params = {
+                'tau': 1.0,
+                'accel': 2.6,
+                'decel': 4.5,
+                'sigma': 0.5,
+                'speedFactor': 1.0
+            }
         
-        # Current parameters (start with defaults)
-        self.current_params = {
-            'tau': 1.0,
-            'accel': 2.6,
-            'decel': 4.5,
-            'sigma': 0.5,
-            'speedFactor': 1.0
-        }
-        
-        # Parameter bounds (Cairo-specific)
+        # Parameter bounds (Cairo-specific - allow wider range for congestion)
         self.param_bounds = {
             'tau': (0.5, 1.5),
-            'accel': (2.0, 4.5),
+            'accel': (1.5, 4.5),
             'decel': (3.5, 6.0),
-            'sigma': (0.2, 0.8),
-            'speedFactor': (0.9, 1.3)
+            'sigma': (0.2, 0.9),
+            'speedFactor': (0.5, 1.3)  # Allow down to 0.5 for heavy congestion!
         }
         
         # Performance history
@@ -100,40 +111,76 @@ class DynamicCalibrator:
     
     def get_current_real_metrics(self) -> Dict:
         """
-        Get recent real-world traffic metrics
-        Uses latest data from database
+        Get real-world traffic metrics
+        Uses freshly collected area-specific data or defaults to typical urban traffic speeds
         """
         try:
-            routes = self.db.get_probe_routes(active_only=True)
-            
-            if not routes:
-                return {}
-            
-            speeds = []
-            
-            # Get most recent data for each route
-            for route in routes:
-                data = self.db.get_real_traffic_data(route_id=route['route_id'], limit=3)
-                
-                for record in data:
-                    if record['speed_kmh']:
-                        speeds.append(record['speed_kmh'])
-            
-            if not speeds:
-                return {}
-            
-            metrics = {
-                'avg_speed_kmh': np.mean(speeds),
-                'median_speed_kmh': np.median(speeds),
-                'std_speed': np.std(speeds) if len(speeds) > 1 else 0,
-                'num_samples': len(speeds)
+            # Priority 1: Try to get area-specific data collected before this simulation
+            if self.scenario_id:
+                cursor = self.db.conn.cursor()
+                cursor.execute("""
+                    SELECT speed_kmh
+                    FROM real_traffic_data
+                    WHERE area_id = ? AND speed_kmh IS NOT NULL
+                    ORDER BY timestamp DESC
+                """, (self.scenario_id,))
+                results = cursor.fetchall()
+
+                if results:
+                    speeds = [r['speed_kmh'] for r in results if r['speed_kmh']]
+                    if speeds:
+                        avg_speed = sum(speeds) / len(speeds)
+                        print(f"[DYNAMIC_CALIB] Using fresh real-world data from selected area: {avg_speed:.1f} km/h ({len(speeds)} samples)")
+                        return {
+                            'avg_speed_kmh': avg_speed,
+                            'median_speed_kmh': sorted(speeds)[len(speeds)//2] if len(speeds) > 0 else avg_speed,
+                            'std_speed': (sum((s - avg_speed)**2 for s in speeds) / len(speeds))**0.5 if len(speeds) > 1 else 0,
+                            'num_samples': len(speeds)
+                        }
+
+            # Priority 2: Try recent real_traffic_data from any area
+            cursor = self.db.conn.cursor()
+            cursor.execute("""
+                SELECT speed_kmh
+                FROM real_traffic_data
+                WHERE speed_kmh IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 10
+            """)
+            results = cursor.fetchall()
+
+            if results:
+                speeds = [r['speed_kmh'] for r in results if r['speed_kmh']]
+                if speeds:
+                    avg_speed = sum(speeds) / len(speeds)
+                    print(f"[DYNAMIC_CALIB] Using recent real-world data: {avg_speed:.1f} km/h ({len(speeds)} samples)")
+                    return {
+                        'avg_speed_kmh': avg_speed,
+                        'median_speed_kmh': sorted(speeds)[len(speeds)//2] if len(speeds) > 0 else avg_speed,
+                        'std_speed': 0,
+                        'num_samples': len(speeds)
+                    }
+
+            # Fallback: Use typical urban traffic speed
+            # Based on global studies: urban traffic averages 30-40 km/h
+            print(f"[DYNAMIC_CALIB] No real-world data found, using default urban speed: 36.9 km/h")
+            default_speed = 36.9  # km/h (typical congested urban speed)
+            return {
+                'avg_speed_kmh': default_speed,
+                'median_speed_kmh': default_speed,
+                'std_speed': 0,
+                'num_samples': 0
             }
-            
-            return metrics
-            
+
         except Exception as e:
             print(f"[DYNAMIC_CALIB] Error getting real metrics: {e}")
-            return {}
+            # Return default urban speed
+            return {
+                'avg_speed_kmh': 36.9,
+                'median_speed_kmh': 36.9,
+                'std_speed': 0,
+                'num_samples': 0
+            }
     
     def calculate_current_error(self) -> float:
         """
@@ -338,15 +385,16 @@ class DynamicCalibrator:
         final_error = self.error_history[-1] if self.error_history else None
         
         improvement = None
+        improvement_pct = None
         if initial_error and final_error:
             improvement = initial_error - final_error
             improvement_pct = (improvement / initial_error) * 100
-        
+
         report = {
             'initial_error': initial_error,
             'final_error': final_error,
             'improvement': improvement,
-            'improvement_pct': improvement_pct if improvement else None,
+            'improvement_pct': improvement_pct,
             'num_updates': len(self.param_history),
             'final_params': self.current_params.copy(),
             'error_history': list(self.error_history)
@@ -384,17 +432,23 @@ class DynamicCalibrator:
     def save_to_database(self, scenario_id: str):
         """Save calibration results to database"""
         report = self.get_final_report()
-        
+
         if not report or not report['final_params']:
             return
-        
+
+        # Build notes with improvement info
+        if report['improvement_pct'] is not None:
+            notes = f"Dynamic calibration: {report['num_updates']} updates, " \
+                    f"{report['improvement_pct']:.1f}% improvement"
+        else:
+            notes = f"Dynamic calibration: {report['num_updates']} updates"
+
         self.db.store_calibration_params(
             scenario_id=scenario_id,
             params=report['final_params'],
             rmse=report['final_error'],
             mae=report['final_error'],
-            notes=f"Dynamic calibration: {report['num_updates']} updates, "
-                  f"{report['improvement_pct']:.1f}% improvement"
+            notes=notes
         )
-        
+
         print(f"[DYNAMIC_CALIB] Saved results to database for scenario {scenario_id}")

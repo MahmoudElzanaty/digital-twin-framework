@@ -1,19 +1,17 @@
 """
-Updated Simulator with Dynamic Calibration and Fixed Route Tracking
-REPLACES simulator.py
+Simplified Simulator with Dynamic Calibration
+Automatically generates routes from network topology
 """
 import os
 import traci
 from datetime import datetime
 from modules.logger import TrafficLogger
-from modules.route_tracker import RouteMonitor  # Use FIXED version
-from modules.dynamic_calibrator import DynamicCalibrator  # NEW!
+from modules.dynamic_calibrator import DynamicCalibrator
 from modules.database import get_db
 from modules.area_comparison import AreaBasedComparison
-from modules.network_based_route_generator import NetworkBasedRouteGenerator
 
-def create_config(net_file, route_file, cfg_path):
-    """Create SUMO configuration file"""
+def create_config(net_file, route_file, cfg_path, sim_time=3600):
+    """Create SUMO configuration file with anti-deadlock settings"""
     net_rel = os.path.relpath(net_file, start=os.path.dirname(cfg_path))
     route_rel = os.path.relpath(route_file, start=os.path.dirname(cfg_path))
 
@@ -24,41 +22,53 @@ def create_config(net_file, route_file, cfg_path):
     </input>
     <time>
         <begin value="0"/>
-        <end value="3600"/>
+        <end value="{sim_time}"/>
+        <step-length value="1"/>
     </time>
     <processing>
-        <time-to-teleport value="-1"/>
+        <time-to-teleport value="300"/>
+        <time-to-teleport.highways value="120"/>
+        <max-depart-delay value="300"/>
+        <collision.action value="teleport"/>
+        <collision.mingap-factor value="0.5"/>
+        <routing-algorithm value="dijkstra"/>
     </processing>
+    <report>
+        <verbose value="true"/>
+        <duration-log.statistics value="true"/>
+        <no-step-log value="true"/>
+    </report>
 </configuration>"""
-    
+
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-    
+
     with open(cfg_path, "w") as f:
         f.write(cfg_content)
-    
+
     return cfg_path
 
 
 def run_simulation(
-    cfg_file, 
-    gui=True, 
-    scenario_id=None, 
+    cfg_file,
+    gui=True,
+    scenario_id=None,
     enable_digital_twin=True,
-    enable_dynamic_calibration=False  # NEW OPTION!
+    enable_dynamic_calibration=True,  # ENABLED BY DEFAULT - Real-time parameter adjustment!
+    initial_params=None  # Cairo parameters from traffic configurator
 ):
     """
-    Run SUMO simulation with ALL enhanced features:
-    - Fixed route tracking (spatial matching)
-    - Dynamic calibration (real-time adjustment)
-    - Area-based comparison
-    - Digital twin validation
-    
+    Run SUMO simulation with enhanced features:
+    - Dynamic calibration (real-time adjustment) - ENABLED BY DEFAULT!
+    - Area-based comparison with real-world data
+    - Traffic pattern analysis
+
     Args:
         cfg_file: Path to SUMO config file
         gui: Whether to use GUI
         scenario_id: Unique ID for this simulation run
-        enable_digital_twin: Enable route monitoring and comparison
-        enable_dynamic_calibration: Enable real-time parameter adjustment
+        enable_digital_twin: Enable area-based comparison with real data
+        enable_dynamic_calibration: Enable real-time parameter adjustment (default: True)
+        initial_params: Initial vehicle parameters (from traffic configurator)
     """
     # Generate scenario ID if not provided
     if scenario_id is None:
@@ -79,64 +89,22 @@ def run_simulation(
 
     step = 0
 
-    # Standard traffic logging
-    logger = TrafficLogger(log_dir="data/logs", interval=10)
+    # Standard traffic logging (interval=50 for better performance on large networks)
+    logger = TrafficLogger(log_dir="data/logs", interval=50)
 
-    # NETWORK-BASED ROUTE GENERATION (NEW!)
-    # Generate probe routes from actual SUMO network edges
-    if enable_digital_twin:
-        print("\n[SIMULATOR] 🗺️  Generating probe routes from network...")
-        try:
-            route_gen = NetworkBasedRouteGenerator()
-            if route_gen.initialize_from_network():
-                # Extract location name from scenario_id
-                location_name = scenario_id.split('_')[0] if scenario_id else "simulation"
-
-                # Generate 8 routes based on actual network
-                network_routes = route_gen.generate_network_based_routes(
-                    location_name=location_name,
-                    num_routes=8,
-                    min_route_length=200.0
-                )
-
-                if network_routes:
-                    print(f"[SIMULATOR] ✅ Generated {len(network_routes)} network-based probe routes")
-                else:
-                    print("[SIMULATOR] ⚠️ Could not generate network-based routes")
-            else:
-                print("[SIMULATOR] ⚠️ Network initialization failed")
-
-        except Exception as e:
-            print(f"[SIMULATOR] ⚠️ Route generation error: {e}")
-
-    # FIXED ROUTE MONITORING
-    route_monitor = None
-    if enable_digital_twin:
-        try:
-            route_monitor = RouteMonitor()
-
-            # CRITICAL: Initialize route mappings AFTER SUMO starts
-            if not route_monitor.initialize_routes():
-                print("[SIMULATOR] ⚠️ Route monitoring disabled - no routes mapped")
-                route_monitor = None
-            else:
-                print(f"[SIMULATOR] ✅ Route monitoring enabled")
-
-        except Exception as e:
-            print(f"[SIMULATOR] ⚠️ Could not enable route monitoring: {e}")
-            route_monitor = None
-
-    # DYNAMIC CALIBRATION (NEW!)
+    # DYNAMIC CALIBRATION - Real-time parameter optimization
     dynamic_calib = None
     if enable_dynamic_calibration:
         try:
             dynamic_calib = DynamicCalibrator(
                 update_interval=300,  # Update every 5 sim-minutes
                 learning_rate=0.1,
-                window_size=10
+                window_size=10,
+                scenario_id=scenario_id,  # Pass scenario_id for area-specific data
+                initial_params=initial_params  # Start with Cairo parameters!
             )
             print(f"[SIMULATOR] ✅ Dynamic calibration enabled")
-            
+
         except Exception as e:
             print(f"[SIMULATOR] ⚠️ Could not enable dynamic calibration: {e}")
             dynamic_calib = None
@@ -147,31 +115,23 @@ def run_simulation(
         while traci.simulation.getMinExpectedNumber() > 0:
             traci.simulationStep()
             step += 1
-            
+
             # Standard logging
             logger.log_step(step)
-            
-            # ROUTE MONITORING (Fixed version)
-            if route_monitor:
-                route_monitor.update(step)
-            
+
             # DYNAMIC CALIBRATION (Real-time adjustment!)
             if dynamic_calib:
                 updated = dynamic_calib.update(step)
                 if updated:
                     print(f"[SIMULATOR] 🎯 Parameters updated at step {step}")
-            
+
             # Progress updates
             if step % 100 == 0:
                 status = f"Step {step}"
-                
-                if route_monitor:
-                    tracker_stats = route_monitor.tracker.get_stats()
-                    status += f" | Tracking: {tracker_stats['active_vehicles']} active, {tracker_stats['completed_vehicles']} completed"
-                
+
                 if dynamic_calib and dynamic_calib.last_sim_speed:
                     status += f" | Sim speed: {dynamic_calib.last_sim_speed:.1f} km/h"
-                
+
                 print(f"[SIMULATOR] {status}")
                 
     finally:
@@ -179,26 +139,7 @@ def run_simulation(
         
         # Save standard logs
         logger.close()
-        
-        # ROUTE MONITORING RESULTS
-        if route_monitor:
-            try:
-                # Print summary
-                route_monitor.print_summary()
-                
-                # Save to database
-                route_monitor.save_results_to_db(scenario_id)
-                
-                # Coverage report (for debugging)
-                coverage = route_monitor.get_coverage_report()
-                print(f"\n[SIMULATOR] Coverage: {coverage['routes_with_data']}/{coverage['total_routes']} routes have data")
-                
-                if coverage['routes_without_data']:
-                    print(f"[SIMULATOR] Routes without data: {', '.join(coverage['routes_without_data'][:3])}...")
-                    
-            except Exception as e:
-                print(f"[SIMULATOR] ⚠️ Error in route monitoring results: {e}")
-        
+
         # DYNAMIC CALIBRATION RESULTS
         if dynamic_calib:
             try:
@@ -247,15 +188,14 @@ def run_simulation(
         # Summary
         print(f"\nResults saved:")
         print(f"  - Traffic logs: data/logs/edge_state.csv")
-        print(f"  - Route tracking: Database (scenario: {scenario_id})")
         if dynamic_calib:
             print(f"  - Dynamic calibration: Database")
         print(f"  - Comparison report: data/reports/report_{scenario_id}.txt")
-        
+
         print(f"\nNext steps:")
-        print(f"  1. View detailed comparison: python testsim.py")
-        print(f"  2. Run digital twin tests: python test_digital_twin_comparison.py --quick")
-        print(f"  3. Analyze results in GUI: Results & Analysis tab")
+        print(f"  1. Analyze results in GUI: Results & Analysis tab")
+        print(f"  2. View calibration improvements")
+        print(f"  3. Compare with real-world data")
         
         return scenario_id
 

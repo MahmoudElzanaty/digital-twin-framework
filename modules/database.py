@@ -30,20 +30,70 @@ class DigitalTwinDatabase:
         cursor = self.conn.cursor()
 
         try:
-            # Check if real_traffic_data has area_id column
-            cursor.execute("PRAGMA table_info(real_traffic_data)")
-            columns = [col[1] for col in cursor.fetchall()]
+            # Check if real_traffic_data table exists
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='real_traffic_data'")
+            table_exists = cursor.fetchone()
 
-            if 'area_id' not in columns:
-                print("[DB] Migrating schema: Adding area-related columns...")
+            if table_exists:
+                # Get table info including NOT NULL constraints
+                cursor.execute("PRAGMA table_info(real_traffic_data)")
+                table_info = cursor.fetchall()
+                columns = {col[1]: {'notnull': col[3]} for col in table_info}
 
-                # Add area_id to real_traffic_data
-                cursor.execute("ALTER TABLE real_traffic_data ADD COLUMN area_id TEXT")
-                cursor.execute("ALTER TABLE real_traffic_data ADD COLUMN origin_lat REAL")
-                cursor.execute("ALTER TABLE real_traffic_data ADD COLUMN origin_lon REAL")
-                cursor.execute("ALTER TABLE real_traffic_data ADD COLUMN dest_lat REAL")
-                cursor.execute("ALTER TABLE real_traffic_data ADD COLUMN dest_lon REAL")
-                print("[DB] Added columns to real_traffic_data")
+                # Check if route_id has NOT NULL constraint (old schema bug)
+                if 'route_id' in columns and columns['route_id']['notnull'] == 1:
+                    print("[DB] ⚠️ Fixing old schema: route_id should be nullable")
+                    print("[DB] Recreating real_traffic_data table...")
+
+                    # Create new table with correct schema
+                    cursor.execute("""
+                        CREATE TABLE real_traffic_data_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            route_id TEXT,
+                            area_id TEXT,
+                            timestamp TEXT NOT NULL,
+                            travel_time_seconds INTEGER NOT NULL,
+                            distance_meters INTEGER NOT NULL,
+                            traffic_delay_seconds INTEGER,
+                            speed_kmh REAL,
+                            data_source TEXT NOT NULL,
+                            raw_data TEXT,
+                            origin_lat REAL,
+                            origin_lon REAL,
+                            dest_lat REAL,
+                            dest_lon REAL
+                        )
+                    """)
+
+                    # Copy existing data
+                    try:
+                        cursor.execute("""
+                            INSERT INTO real_traffic_data_new
+                            SELECT * FROM real_traffic_data
+                        """)
+                    except:
+                        # If columns don't match, skip data migration
+                        pass
+
+                    # Drop old table and rename
+                    cursor.execute("DROP TABLE real_traffic_data")
+                    cursor.execute("ALTER TABLE real_traffic_data_new RENAME TO real_traffic_data")
+                    print("[DB] ✅ Fixed: route_id is now nullable")
+
+                else:
+                    # Add missing columns if needed
+                    column_names = [col[1] for col in table_info]
+
+                    if 'area_id' not in column_names:
+                        print("[DB] Adding area_id column...")
+                        cursor.execute("ALTER TABLE real_traffic_data ADD COLUMN area_id TEXT")
+
+                    if 'origin_lat' not in column_names:
+                        print("[DB] Adding coordinate columns...")
+                        cursor.execute("ALTER TABLE real_traffic_data ADD COLUMN origin_lat REAL")
+                        cursor.execute("ALTER TABLE real_traffic_data ADD COLUMN origin_lon REAL")
+                        cursor.execute("ALTER TABLE real_traffic_data ADD COLUMN dest_lat REAL")
+                        cursor.execute("ALTER TABLE real_traffic_data ADD COLUMN dest_lon REAL")
 
             # Check if probe_routes has area_id column
             cursor.execute("PRAGMA table_info(probe_routes)")
@@ -61,7 +111,7 @@ class DigitalTwinDatabase:
             self.conn.commit()
             print("[DB] Schema migration complete")
 
-        except sqlite3.OperationalError as e:
+        except Exception as e:
             # Table doesn't exist yet, that's fine
             print(f"[DB] Migration skipped: {e}")
             pass

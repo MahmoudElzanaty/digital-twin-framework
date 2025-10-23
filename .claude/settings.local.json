@@ -14,7 +14,8 @@
       "Bash(taskkill:*)",
       "Bash(dir:*)",
       "Bash(del:*)",
-      "Bash(tree:*)"
+      "Bash(tree:*)",
+      "Bash(pip install:*)"
     ],
     "deny": [],
     "ask": []

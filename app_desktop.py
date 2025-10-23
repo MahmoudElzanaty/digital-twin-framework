@@ -16,17 +16,16 @@ from folium import plugins
 from geopy.geocoders import Nominatim
 
 # import your framework modules
-from modules.auto_route_generator import AutoRouteGenerator
 from modules.network_builder import generate_network_from_bbox
-from modules.demand_generator import generate_routes
+from modules.demand_generator import generate_routes, generate_targeted_routes
 from modules.simulator import create_config, run_simulation
 from modules.database import get_db
 from modules.data_collector import TrafficDataCollector, TrafficDataAnalyzer
 from modules.area_comparison import AreaBasedComparison
 from modules.ai_predictor import SimpleTrafficPredictor, AdaptivePredictor
-from modules.calibrator import SUMOCalibrator
 from modules.area_manager import AreaManager
 from modules.area_wide_collector import AreaWideCollector
+from modules.simple_route_generator import SimpleRouteGenerator
 
 
 # ============== WORKER THREADS ==============
@@ -49,42 +48,6 @@ class DataCollectionWorker(QThread):
             results = collector.collect_all_probe_routes()
             self.progress.emit(f"Collected data for {len(results)} routes")
             self.finished.emit(results)
-        except Exception as e:
-            self.progress.emit(f"Error: {str(e)}")
-            self.finished.emit({})
-
-class CalibrationWorker(QThread):
-    """Background thread for calibration"""
-    progress = pyqtSignal(str)
-    iteration_complete = pyqtSignal(int, float)
-    finished = pyqtSignal(dict)
-    
-    def __init__(self, network_file, route_file, mode='quick'):
-        super().__init__()
-        self.network_file = network_file
-        self.route_file = route_file
-        self.mode = mode
-        self.running = True
-    
-    def run(self):
-        try:
-            calibrator = SUMOCalibrator(self.network_file, self.route_file)
-            self.progress.emit("Starting calibration...")
-            
-            if self.mode == 'quick':
-                best_params = calibrator.quick_calibration(num_tests=5)
-            else:
-                best_params = calibrator.sequential_optimization()
-            
-            calibrator.save_best_parameters()
-            self.progress.emit("Calibration complete!")
-            
-            result = {
-                'best_params': best_params,
-                'best_error': calibrator.best_error,
-                'history': calibrator.calibration_history
-            }
-            self.finished.emit(result)
         except Exception as e:
             self.progress.emit(f"Error: {str(e)}")
             self.finished.emit({})
@@ -230,6 +193,15 @@ class MapBridge(QObject):
         self.regionSelected.emit(data)
         print(f"[BRIDGE] Signal emitted")
 
+class RouteBridge(QObject):
+    """Bridge for route point selection (JavaScript to Python)"""
+    pointSelected = pyqtSignal(float, float)  # emits lat, lon
+
+    @pyqtSlot(float, float)
+    def receivePoint(self, lat, lon):
+        print(f"[ROUTE_BRIDGE] Point selected: {lat}, {lon}")
+        self.pointSelected.emit(lat, lon)
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -277,6 +249,28 @@ class MainWindow(QWidget):
         self.init_area_map([30.0444, 31.2357], 12)
 
         print("[DEBUG] Area training bridge and channel initialized")
+
+        # Initialize route estimation map
+        try:
+            self.route_bridge = RouteBridge()
+            self.route_channel = QWebChannel()
+            self.route_channel.registerObject("bridge", self.route_bridge)
+
+            # Enable web console messages for debugging
+            self.route_map_view.page().javaScriptConsoleMessage = lambda level, message, lineNumber, sourceID: print(f"[ROUTE_MAP JS] {message}")
+
+            self.route_map_view.page().setWebChannel(self.route_channel)
+            self.route_bridge.pointSelected.connect(self.on_route_point_selected)
+            self.route_map_view.loadFinished.connect(self.on_route_map_loaded)
+
+            print(f"[DEBUG] Route map view exists: {self.route_map_view is not None}")
+            print(f"[DEBUG] Initializing route map...")
+            self.init_route_map()  # Use default parameters
+            print("[DEBUG] Route estimation bridge and channel initialized")
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize route map: {e}")
+            import traceback
+            traceback.print_exc()
 
         # Load initial dashboard data
         self.refresh_dashboard()
@@ -374,26 +368,16 @@ class MainWindow(QWidget):
         
         # Buttons
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | 
+            QDialogButtonBox.StandardButton.Ok |
             QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        
+
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            generator = AutoRouteGenerator()
-            location = self.location_input.text() or "custom_area"
-            
-            routes = generator.auto_generate_for_area(
-                self.selected_bbox,
-                location,
-                strategy_combo.currentText(),
-                num_spin.value()
-            )
-            
-            QMessageBox.information(self, "Success", 
-                f"Created {len(routes)} routes!")
+            QMessageBox.information(self, "Info",
+                "Routes will be automatically generated from network topology during simulation!")
 
     # ============== TAB 1: MAP & SIMULATION (ORIGINAL - UNTOUCHED) ==============
     
@@ -490,8 +474,8 @@ class MainWindow(QWidget):
         dur_label = QLabel("⏱️ Duration (seconds):")
         dur_label.setFont(QFont("Segoe UI", 10))
         self.duration = QSpinBox()
-        self.duration.setRange(300, 7200)
-        self.duration.setValue(1800)
+        self.duration.setRange(300, 14400)  # Extended to 4 hours max
+        self.duration.setValue(7200)  # Default 2 hours for better data coverage
         self.duration.setSuffix(" s")
         self.duration.setMinimumHeight(35)
         self.duration.setMinimumWidth(120)
@@ -521,6 +505,13 @@ class MainWindow(QWidget):
         controls_layout.addWidget(calib_indicator)
 
         controls_layout.addStretch()
+
+        # View cached networks button
+        self.view_cache_btn = QPushButton("💾 View Cached Networks")
+        self.view_cache_btn.setMinimumHeight(40)
+        self.view_cache_btn.setFont(QFont("Segoe UI", 10))
+        self.view_cache_btn.clicked.connect(self.view_cached_networks)
+        controls_layout.addWidget(self.view_cache_btn)
 
         # Run button
         self.run_btn = QPushButton("▶️ Run Simulation")
@@ -1113,7 +1104,7 @@ class MainWindow(QWidget):
     # ============== TAB 5: CALIBRATION CENTER ==============
 
     def create_calibration_tab(self):
-        """Create calibration center tab"""
+        """Create dynamic calibration info tab"""
         from PyQt6.QtWidgets import QScrollArea
 
         tab = QWidget()
@@ -1131,89 +1122,135 @@ class MainWindow(QWidget):
         layout = QVBoxLayout(scroll_content)
         layout.setSpacing(15)
         layout.setContentsMargins(20, 20, 20, 20)
-        
-        # Calibration info
+
+        # Header
+        header_label = QLabel("🎯 Dynamic Calibration System")
+        header_font = QFont()
+        header_font.setPointSize(14)
+        header_font.setBold(True)
+        header_label.setFont(header_font)
+        layout.addWidget(header_label)
+
+        # Info
         info_label = QLabel(
-            "Calibration tunes SUMO parameters to match real Cairo traffic patterns.\n"
-            "This improves simulation accuracy from ~23% error to <15%."
+            "Dynamic calibration automatically adjusts SUMO parameters IN REAL-TIME during simulation!\n\n"
+            "Unlike traditional offline calibration that runs multiple simulations, dynamic calibration:\n"
+            "• Learns while simulating (adaptive learning)\n"
+            "• Adjusts parameters every 5 simulated minutes\n"
+            "• Uses gradient descent to minimize error\n"
+            "• Applies changes to vehicles on-the-fly\n\n"
+            "This is ENABLED BY DEFAULT for all simulations."
         )
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
-        
-        # Current status
-        status_group = QGroupBox("📊 Current Status")
+
+        # Status
+        status_group = QGroupBox("📊 Status")
         status_layout = QVBoxLayout(status_group)
-        
-        self.calib_status_label = QLabel("Status: Not calibrated (using defaults)")
-        self.calib_error_label = QLabel("Baseline Error: 22.84%")
-        status_layout.addWidget(self.calib_status_label)
-        status_layout.addWidget(self.calib_error_label)
-        
+
+        status_label = QLabel(
+            "✅ Dynamic calibration is ACTIVE\n"
+            "🔄 Automatically enabled for all simulations\n"
+            "⚡ Real-time parameter optimization"
+        )
+        status_label.setWordWrap(True)
+        status_layout.addWidget(status_label)
+
         layout.addWidget(status_group)
-        
-        # Calibration controls
-        controls_group = QGroupBox("🔧 Calibration Controls")
-        controls_layout = QVBoxLayout(controls_group)
-        
-        # Mode selection
-        mode_layout = QHBoxLayout()
-        mode_layout.addWidget(QLabel("Calibration Mode:"))
-        self.calib_mode_combo = QComboBox()
-        self.calib_mode_combo.addItems(["Quick (5 tests, ~20 min)", "Full (optimize all, ~1-2 hours)"])
-        mode_layout.addWidget(self.calib_mode_combo)
-        mode_layout.addStretch()
-        controls_layout.addLayout(mode_layout)
-        
-        # Action buttons
-        btn_layout = QHBoxLayout()
-        
-        self.run_calib_btn = QPushButton("▶️ Run Calibration")
-        self.run_calib_btn.clicked.connect(self.run_calibration)
-        btn_layout.addWidget(self.run_calib_btn)
-        
-        self.stop_calib_btn = QPushButton("⏹️ Stop")
-        self.stop_calib_btn.setEnabled(False)
-        btn_layout.addWidget(self.stop_calib_btn)
-        
-        self.load_calib_btn = QPushButton("📂 Load Saved Parameters")
-        self.load_calib_btn.clicked.connect(self.load_calibration)
-        btn_layout.addWidget(self.load_calib_btn)
-        
-        btn_layout.addStretch()
-        controls_layout.addLayout(btn_layout)
-        
-        # Progress
-        self.calib_progress = QProgressBar()
-        self.calib_progress_label = QLabel("Ready")
-        controls_layout.addWidget(self.calib_progress)
-        controls_layout.addWidget(self.calib_progress_label)
-        
-        layout.addWidget(controls_group)
-        
-        # Parameters table
-        params_group = QGroupBox("📋 SUMO Parameters")
+
+        # How it works
+        how_it_works_group = QGroupBox("🔧 How It Works")
+        how_it_works_layout = QVBoxLayout(how_it_works_group)
+
+        how_it_works_text = QTextEdit()
+        how_it_works_text.setReadOnly(True)
+        how_it_works_text.setMaximumHeight(200)
+        how_it_works_text.setPlainText(
+            "1. SIMULATION STARTS\n"
+            "   - Vehicles use default parameters\n"
+            "   - System monitors speed and traffic flow\n\n"
+            "2. ERROR CALCULATION (every 5 sim-minutes)\n"
+            "   - Compare simulation speed vs real-world speed\n"
+            "   - Calculate percentage error\n\n"
+            "3. GRADIENT COMPUTATION\n"
+            "   - Determine which direction to adjust each parameter\n"
+            "   - Use heuristic rules based on traffic physics\n\n"
+            "4. PARAMETER UPDATE\n"
+            "   - Apply gradient descent: param = param - learning_rate * gradient\n"
+            "   - Clip values to realistic bounds\n\n"
+            "5. APPLY TO VEHICLES\n"
+            "   - Update all active vehicles with new parameters\n"
+            "   - Changes take effect immediately!\n\n"
+            "6. REPEAT\n"
+            "   - Continue adjusting until simulation ends\n"
+            "   - Save final optimized parameters to database"
+        )
+        how_it_works_layout.addWidget(how_it_works_text)
+
+        layout.addWidget(how_it_works_group)
+
+        # Parameters being tuned
+        params_group = QGroupBox("📋 Parameters Being Dynamically Tuned")
         params_layout = QVBoxLayout(params_group)
-        
-        self.params_table = QTableWidget()
-        self.params_table.setColumnCount(3)
-        self.params_table.setHorizontalHeaderLabels(["Parameter", "Default", "Calibrated"])
-        self.params_table.horizontalHeader().setStretchLastSection(True)
-        params_layout.addWidget(self.params_table)
-        
-        self.populate_params_table()
-        
+
+        params_table = QTableWidget()
+        params_table.setColumnCount(3)
+        params_table.setHorizontalHeaderLabels(["Parameter", "Description", "Effect on Traffic"])
+        params_table.horizontalHeader().setStretchLastSection(True)
+
+        params_data = [
+            ("speedFactor", "Speed limit multiplier", "Higher = faster speeds"),
+            ("tau", "Car-following headway", "Lower = closer following, faster flow"),
+            ("accel", "Max acceleration", "Higher = faster acceleration"),
+            ("decel", "Max deceleration", "Higher = harder braking"),
+            ("sigma", "Driver imperfection", "Higher = more randomness, slower")
+        ]
+
+        params_table.setRowCount(len(params_data))
+        for i, (param, desc, effect) in enumerate(params_data):
+            params_table.setItem(i, 0, QTableWidgetItem(param))
+            params_table.setItem(i, 1, QTableWidgetItem(desc))
+            params_table.setItem(i, 2, QTableWidgetItem(effect))
+
+        params_table.resizeColumnsToContents()
+        params_layout.addWidget(params_table)
+
         layout.addWidget(params_group)
-        
-        # Results
-        results_group = QGroupBox("📈 Calibration Results")
+
+        # Configuration
+        config_group = QGroupBox("⚙️ Configuration")
+        config_layout = QVBoxLayout(config_group)
+
+        config_label = QLabel(
+            "Update Interval: Every 300 simulation steps (5 simulated minutes)\n"
+            "Learning Rate: 0.1 (10% adjustment per update)\n"
+            "History Window: Last 10 measurements\n\n"
+            "To disable dynamic calibration, edit simulator.py:\n"
+            "Set enable_dynamic_calibration=False in run_simulation()"
+        )
+        config_label.setWordWrap(True)
+        config_layout.addWidget(config_label)
+
+        layout.addWidget(config_group)
+
+        # View results
+        results_group = QGroupBox("📈 View Results")
         results_layout = QVBoxLayout(results_group)
-        
-        self.calib_results = QTextEdit()
-        self.calib_results.setReadOnly(True)
-        self.calib_results.setMaximumHeight(150)
-        results_layout.addWidget(self.calib_results)
-        
+
+        results_label = QLabel(
+            "Dynamic calibration results are automatically saved to the database.\n"
+            "View them in the 'Results & Analysis' tab after running a simulation.\n\n"
+            "The system will show:\n"
+            "• Initial vs final error\n"
+            "• Parameter evolution over time\n"
+            "• Improvement percentage"
+        )
+        results_label.setWordWrap(True)
+        results_layout.addWidget(results_label)
+
         layout.addWidget(results_group)
+
+        layout.addStretch()
 
         # Set the scroll content
         scroll.setWidget(scroll_content)
@@ -1370,12 +1407,96 @@ class MainWindow(QWidget):
         # Comparison view
         comparison_group = QGroupBox("📊 Latest Comparison")
         comparison_layout = QVBoxLayout(comparison_group)
-        
+
         self.comparison_text = QTextEdit()
         self.comparison_text.setReadOnly(True)
         comparison_layout.addWidget(self.comparison_text)
-        
+
         layout.addWidget(comparison_group)
+
+        # Route Estimation section - NEW!
+        route_est_group = QGroupBox("🗺️ Route Time Estimation (Based on Simulation)")
+        route_est_layout = QVBoxLayout(route_est_group)
+
+        # Instructions
+        inst_label = QLabel(
+            "Click on the map below to select your route:\n"
+            "1️⃣ First click = Origin (starting point) - shown in GREEN\n"
+            "2️⃣ Second click = Destination (end point) - shown in RED\n"
+            "Then click 'Estimate Travel Time' to get results based on simulation data."
+        )
+        inst_label.setWordWrap(True)
+        inst_label.setStyleSheet("background-color: #E3F2FD; padding: 10px; border-radius: 5px; font-size: 11pt;")
+        route_est_layout.addWidget(inst_label)
+
+        # Map for point selection
+        self.route_map_view = QWebEngineView()
+        self.route_map_view.setMinimumHeight(400)
+
+        # Enable web features for loading external resources (Leaflet CDN)
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+        settings = self.route_map_view.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+
+        route_est_layout.addWidget(self.route_map_view)
+
+        # Selected points display
+        self.route_selection_label = QLabel("❓ No points selected yet. Click on the map to select origin and destination.")
+        self.route_selection_label.setWordWrap(True)
+        self.route_selection_label.setStyleSheet("padding: 10px; background: #FFF3E0; border-radius: 5px; font-size: 10pt;")
+        route_est_layout.addWidget(self.route_selection_label)
+
+        # Clear selection button
+        route_action_layout = QHBoxLayout()
+
+        clear_route_btn = QPushButton("🔄 Clear Selection & Start Over")
+        clear_route_btn.clicked.connect(self.clear_route_selection)
+        clear_route_btn.setStyleSheet("padding: 8px;")
+        route_action_layout.addWidget(clear_route_btn)
+
+        refresh_map_btn = QPushButton("🗺️ Refresh Map (Center on Simulated Area)")
+        refresh_map_btn.clicked.connect(lambda: self.init_route_map())
+        refresh_map_btn.setStyleSheet("padding: 8px;")
+        route_action_layout.addWidget(refresh_map_btn)
+
+        route_action_layout.addStretch()
+        route_est_layout.addLayout(route_action_layout)
+
+        # Store selected points
+        self.route_origin = None
+        self.route_destination = None
+
+        # Buttons
+        route_btn_layout = QHBoxLayout()
+
+        self.targeted_sim_btn = QPushButton("🎯 Run Targeted Simulation")
+        self.targeted_sim_btn.setStyleSheet("background-color: #FF9800; padding: 10px; font-weight: bold;")
+        self.targeted_sim_btn.setToolTip("Generate traffic on your selected route to collect data before estimation")
+        self.targeted_sim_btn.clicked.connect(self.run_targeted_simulation)
+        route_btn_layout.addWidget(self.targeted_sim_btn)
+
+        self.estimate_route_btn = QPushButton("📍 Estimate Travel Time")
+        self.estimate_route_btn.setStyleSheet("background-color: #2196F3; padding: 10px; font-weight: bold;")
+        self.estimate_route_btn.clicked.connect(self.estimate_route_time)
+        route_btn_layout.addWidget(self.estimate_route_btn)
+
+        self.compare_google_btn = QPushButton("🌐 Compare with Google Maps")
+        self.compare_google_btn.setStyleSheet("background-color: #4CAF50; padding: 10px; font-weight: bold;")
+        self.compare_google_btn.clicked.connect(self.compare_route_with_google)
+        route_btn_layout.addWidget(self.compare_google_btn)
+
+        route_btn_layout.addStretch()
+        route_est_layout.addLayout(route_btn_layout)
+
+        # Results display
+        self.route_estimate_text = QTextEdit()
+        self.route_estimate_text.setReadOnly(True)
+        self.route_estimate_text.setMaximumHeight(250)
+        route_est_layout.addWidget(self.route_estimate_text)
+
+        layout.addWidget(route_est_group)
 
         # Set the scroll content
         scroll.setWidget(scroll_content)
@@ -1654,50 +1775,10 @@ class MainWindow(QWidget):
             self.log(f"Region selected: {area_km2:.2f} km²", "SUCCESS")
             self.log(f"Bounds: N={coords['north']:.4f}, S={coords['south']:.4f}, "
                     f"E={coords['east']:.4f}, W={coords['west']:.4f}", "INFO")
-
-            # ============ AUTO-GENERATE ROUTES ============
-            location_name = self.location_input.text().strip() or "custom_area"
-            location_name = location_name.replace(",", "").replace(" ", "_").lower()
-            
             self.log("", "INFO")
-            self.log("🎯 Auto-generating probe routes for selected area...", "INFO")
-            
-            try:
-                generator = AutoRouteGenerator()
-                
-                # Get smart recommendations based on area size
-                strategy = generator.get_recommended_strategy(coords)
-                num_routes = generator.get_recommended_num_routes(coords)
-                
-                self.log(f"📊 Area: {area_km2:.2f} km² → {strategy} strategy, {num_routes} routes", "INFO")
-                
-                # Generate routes
-                routes = generator.auto_generate_for_area(
-                    bbox=coords,
-                    location_name=location_name,
-                    strategy=strategy,
-                    num_routes=num_routes
-                )
-                
-                self.log(f"✅ Auto-created {len(routes)} probe routes!", "SUCCESS")
-                self.log(f"   Routes cover your simulation area and will be tracked", "INFO")
-                self.log("", "INFO")
-                
-                # Show sample routes
-                for route in routes[:3]:
-                    self.log(f"   • {route['name']}", "INFO")
-                
-                if len(routes) > 3:
-                    self.log(f"   • ... and {len(routes)-3} more routes", "INFO")
-                
-                self.log("", "INFO")
-                
-            except Exception as e:
-                self.log(f"⚠️ Could not auto-generate routes: {str(e)}", "WARNING")
-                self.log("   Don't worry - area-based comparison will still work", "INFO")
-                import traceback
-                traceback.print_exc()
-            # =============================================
+            self.log("✅ Area ready for simulation!", "SUCCESS")
+            self.log("   Routes will be generated automatically from network topology", "INFO")
+            self.log("", "INFO")
 
             print(f"[DEBUG] self.selected_bbox is now: {self.selected_bbox}")
 
@@ -1956,6 +2037,165 @@ class MainWindow(QWidget):
             import traceback
             traceback.print_exc()
 
+    def view_cached_networks(self):
+        """Show dialog with list of cached networks"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QListWidget, QLabel, QPushButton, QHBoxLayout, QMessageBox
+        from modules.network_builder import get_cached_networks, clear_all_cache
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("💾 Cached Networks")
+        dialog.setMinimumWidth(700)
+        dialog.setMinimumHeight(450)
+
+        layout = QVBoxLayout(dialog)
+
+        # Info label
+        info_label = QLabel("Select a cached network to load it directly (no need to select area on map):")
+        info_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        layout.addWidget(info_label)
+
+        # Get cached networks
+        cache_dir = os.path.join("data", "networks")
+        os.makedirs(cache_dir, exist_ok=True)
+        cached_networks = get_cached_networks(cache_dir)
+
+        list_widget = None
+
+        if not cached_networks:
+            no_cache_label = QLabel("❌ No cached networks found.\n\nCached networks will appear here after you run your first simulation.")
+            no_cache_label.setFont(QFont("Segoe UI", 11))
+            no_cache_label.setStyleSheet("color: #666; padding: 20px;")
+            layout.addWidget(no_cache_label)
+        else:
+            # List widget
+            list_widget = QListWidget()
+            list_widget.setFont(QFont("Segoe UI", 10))
+            list_widget.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+
+            for i, cache in enumerate(cached_networks):
+                bbox = cache['bbox']
+                item_text = (
+                    f"📍 {cache['location']} | "
+                    f"Nodes: {cache['nodes']:,} | Edges: {cache['edges']:,} | "
+                    f"Size: {cache['size_mb']:.1f} MB\n"
+                    f"   Area: ({bbox['south']:.4f}, {bbox['west']:.4f}) to ({bbox['north']:.4f}, {bbox['east']:.4f})"
+                )
+                list_widget.addItem(item_text)
+
+            # Store cached_networks in list widget for later access
+            list_widget.setProperty("cached_networks", cached_networks)
+
+            layout.addWidget(list_widget)
+
+            # Info text
+            info_text = QLabel(
+                f"✅ Found {len(cached_networks)} cached network(s)\n\n"
+                "💡 Click 'Load Selected' to use the network without selecting area on map."
+            )
+            info_text.setFont(QFont("Segoe UI", 9))
+            info_text.setStyleSheet("color: #4CAF50; padding: 10px; background: #E8F5E9; border-radius: 5px;")
+            layout.addWidget(info_text)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        if cached_networks and list_widget:
+            # Load selected button
+            load_btn = QPushButton("✅ Load Selected Network")
+            load_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            load_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px;")
+            load_btn.clicked.connect(lambda: self.load_cached_network(dialog, list_widget))
+            button_layout.addWidget(load_btn)
+
+        button_layout.addStretch()
+
+        if cached_networks:
+            clear_btn = QPushButton("🗑️ Clear All Cache")
+            clear_btn.clicked.connect(lambda: self.clear_cache_confirm(dialog, cache_dir))
+            button_layout.addWidget(clear_btn)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        button_layout.addWidget(close_btn)
+
+        layout.addLayout(button_layout)
+
+        dialog.exec()
+
+    def load_cached_network(self, dialog, list_widget):
+        """Load the selected cached network"""
+        from PyQt6.QtWidgets import QMessageBox
+
+        selected_items = list_widget.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(
+                self,
+                "No Selection",
+                "Please select a cached network from the list."
+            )
+            return
+
+        # Get selected index
+        selected_index = list_widget.row(selected_items[0])
+        cached_networks = list_widget.property("cached_networks")
+        selected_cache = cached_networks[selected_index]
+
+        # Set the bbox
+        self.selected_bbox = selected_cache['bbox']
+
+        # Update UI to show loaded network
+        bbox = selected_cache['bbox']
+        lat_diff = abs(bbox['north'] - bbox['south'])
+        lon_diff = abs(bbox['east'] - bbox['west'])
+        area_km2 = lat_diff * lon_diff * 111 * 111
+
+        self.selection_label.setText(
+            f"✅ Loaded from cache: {selected_cache['location']}\n"
+            f"Area: {area_km2:.2f} km² | "
+            f"Nodes: {selected_cache['nodes']:,} | Edges: {selected_cache['edges']:,}\n"
+            f"Bounds: ({bbox['south']:.4f}, {bbox['west']:.4f}) to "
+            f"({bbox['north']:.4f}, {bbox['east']:.4f})"
+        )
+        self.selection_label.setStyleSheet("color: #2196F3; font-weight: bold; background: #E3F2FD; padding: 10px; border-radius: 5px;")
+
+        # Log it
+        self.log(f"📂 Loaded cached network: {selected_cache['location']}", "SUCCESS")
+        self.log(f"   Network has {selected_cache['nodes']:,} nodes and {selected_cache['edges']:,} edges", "INFO")
+        self.log("   Ready to run simulation!", "INFO")
+
+        # Close dialog
+        dialog.accept()
+
+        QMessageBox.information(
+            self,
+            "Network Loaded",
+            f"✅ Loaded cached network: {selected_cache['location']}\n\n"
+            f"You can now click 'Run Simulation' to start immediately!"
+        )
+
+    def clear_cache_confirm(self, parent_dialog, cache_dir):
+        """Confirm and clear all cached networks"""
+        from PyQt6.QtWidgets import QMessageBox
+        from modules.network_builder import clear_all_cache
+
+        reply = QMessageBox.question(
+            self,
+            "Clear Cache",
+            "Are you sure you want to delete all cached networks?\n\n"
+            "You will need to re-download them next time.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            count = clear_all_cache(cache_dir)
+            QMessageBox.information(
+                self,
+                "Cache Cleared",
+                f"Deleted {count} cached file(s)."
+            )
+            parent_dialog.accept()  # Close the dialog
+            self.log(f"Cleared {count} cached network file(s)", "INFO")
+
     def on_run(self):
         """Run the simulation with Digital Twin integration"""
         print(f"[DEBUG] on_run called. self.selected_bbox = {self.selected_bbox}")
@@ -1981,13 +2221,26 @@ class MainWindow(QWidget):
             out_dir = os.path.join("data", "networks")
             os.makedirs(out_dir, exist_ok=True)
 
-            self.log("Downloading OpenStreetMap data for selected area...", "INFO")
+            # Calculate area size and warn if too large
+            lat_range = self.selected_bbox['north'] - self.selected_bbox['south']
+            lon_range = self.selected_bbox['east'] - self.selected_bbox['west']
+            area_km2 = lat_range * 111 * lon_range * 111  # Approximate area
+
+            if area_km2 > 100:
+                self.log(f"⚠️ Selected area is LARGE ({area_km2:.0f} km²)", "WARNING")
+                self.log("   This may take several minutes. Consider selecting a smaller area.", "WARNING")
+            elif area_km2 > 50:
+                self.log(f"Selected area: {area_km2:.0f} km² (medium size)", "INFO")
+            else:
+                self.log(f"Selected area: {area_km2:.0f} km² (good size for quick simulation)", "INFO")
+
+            self.log("Loading or downloading network for selected area...", "INFO")
             net_path = generate_network_from_bbox(
                 self.selected_bbox,
                 location,
                 out_dir
             )
-            self.log(f"Network generated: {os.path.basename(net_path)}", "SUCCESS")
+            self.log(f"Network ready: {os.path.basename(net_path)}", "SUCCESS")
 
             self.log("Generating traffic demand...", "INFO")
             route_path = generate_routes(
@@ -2001,17 +2254,111 @@ class MainWindow(QWidget):
             cfg_path = create_config(
                 net_path,
                 route_path,
-                os.path.join("data", "configs", "simulation.sumocfg")
+                os.path.join("data", "configs", "simulation.sumocfg"),
+                sim_time=duration
             )
             self.log(f"Config created: {os.path.basename(cfg_path)}", "SUCCESS")
 
             scenario_id = f"{location.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+            # ============ COLLECT REAL-WORLD DATA FOR CALIBRATION ============
+            if self.api_key:
+                self.log("=" * 60, "INFO")
+                self.log("📡 Collecting real-world traffic data for selected area...", "INFO")
+                self.log("=" * 60, "INFO")
+
+                try:
+                    # Generate sample routes within the selected bbox
+                    route_gen = SimpleRouteGenerator()
+                    sample_routes = route_gen.generate_routes_for_bbox(self.selected_bbox, num_routes=5)
+
+                    self.log(f"Generated {len(sample_routes)} sample routes in selected area", "INFO")
+
+                    # Collect Google Maps data for each route
+                    collector = TrafficDataCollector(self.api_key)
+                    collected_count = 0
+
+                    for route in sample_routes:
+                        self.log(f"  Fetching: {route['name']}...", "INFO")
+
+                        data = collector.fetch_route_traffic(
+                            origin_lat=route['origin_lat'],
+                            origin_lon=route['origin_lon'],
+                            dest_lat=route['dest_lat'],
+                            dest_lon=route['dest_lon'],
+                            route_id=None  # Don't store in probe_routes
+                        )
+
+                        if data:
+                            # Store as area-based data for calibration
+                            self.db.conn.execute("""
+                                INSERT INTO real_traffic_data
+                                (area_id, timestamp, travel_time_seconds, distance_meters,
+                                 traffic_delay_seconds, speed_kmh, data_source,
+                                 origin_lat, origin_lon, dest_lat, dest_lon)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                scenario_id,
+                                data['timestamp'],
+                                data['travel_time_seconds'],
+                                data['distance_meters'],
+                                data['traffic_delay_seconds'],
+                                data['speed_kmh'],
+                                'google_maps',
+                                route['origin_lat'],
+                                route['origin_lon'],
+                                route['dest_lat'],
+                                route['dest_lon']
+                            ))
+                            self.db.conn.commit()
+
+                            collected_count += 1
+                            self.log(f"    ✓ Speed: {data['speed_kmh']:.1f} km/h, "
+                                   f"Time: {data['travel_time_seconds']}s", "SUCCESS")
+
+                    self.log("", "INFO")
+                    self.log(f"✅ Collected real-world data: {collected_count}/{len(sample_routes)} routes", "SUCCESS")
+                    self.log("   This data will be used for dynamic calibration!", "INFO")
+                    self.log("=" * 60, "INFO")
+
+                except Exception as e:
+                    self.log(f"⚠️ Could not collect real-world data: {str(e)}", "WARNING")
+                    self.log("   Calibration will use default urban speed (36.9 km/h)", "INFO")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                self.log("⚠️ No API key configured - calibration will use default speed", "WARNING")
+                self.log("   Configure API key in 'Data Collection' tab for real-world data", "INFO")
+            # ================================================================
+
+            # ============ CONFIGURE SIMULATION TO MATCH REAL CAIRO TRAFFIC ============
+            self.log("", "INFO")
+            self.log("Configuring simulation to match real Cairo traffic conditions...", "INFO")
+            cairo_params = None  # Will hold Cairo parameters for dynamic calibrator
+            try:
+                from modules.traffic_configurator import TrafficConfigurator
+                configurator = TrafficConfigurator()
+                config_result = configurator.configure_simulation(scenario_id, route_path)
+
+                if config_result.get('success'):
+                    cairo_params = config_result.get('params')  # Get Cairo parameters
+                    self.log("✅ Simulation configured for Cairo-style traffic", "SUCCESS")
+                    self.log("   Vehicle parameters and density adjusted to match real data", "INFO")
+                else:
+                    self.log("⚠️ Could not configure traffic - using default parameters", "WARNING")
+
+            except Exception as e:
+                self.log(f"⚠️ Traffic configuration failed: {str(e)}", "WARNING")
+                self.log("   Simulation will use default parameters", "INFO")
+                import traceback
+                traceback.print_exc()
+            # ==========================================================================
+
+            self.log("", "INFO")
             self.log("=" * 60, "INFO")
             self.log("🔬 DIGITAL TWIN MODE ENABLED", "INFO")
             self.log("🎯 DYNAMIC CALIBRATION ENABLED", "INFO")
             self.log(f"Scenario ID: {scenario_id}", "INFO")
-            self.log("Simulation will track routes and compare with real data", "INFO")
             self.log("Parameters will adapt in real-time to match real traffic", "INFO")
             self.log("=" * 60, "INFO")
 
@@ -2021,7 +2368,8 @@ class MainWindow(QWidget):
                 gui=True,
                 scenario_id=scenario_id,
                 enable_digital_twin=True,
-                enable_dynamic_calibration=True  # ENABLED: Real-time parameter adaptation
+                enable_dynamic_calibration=True,  # ENABLED: Real-time parameter adaptation
+                initial_params=cairo_params  # Pass Cairo parameters to calibrator!
             )
 
             self.log("=" * 60, "SUCCESS")
@@ -2046,24 +2394,6 @@ class MainWindow(QWidget):
             self.run_btn.setText("▶️ Run Simulation")
 
     # ============== NEW TAB HELPER METHODS ==============
-
-    def populate_params_table(self):
-        """Populate calibration parameters table"""
-        default_params = {
-            'tau': 1.0,
-            'accel': 2.6,
-            'decel': 4.5,
-            'sigma': 0.5,
-            'speedFactor': 1.0,
-            'lcStrategic': 1.0
-        }
-        
-        self.params_table.setRowCount(len(default_params))
-        
-        for i, (param, default) in enumerate(default_params.items()):
-            self.params_table.setItem(i, 0, QTableWidgetItem(param))
-            self.params_table.setItem(i, 1, QTableWidgetItem(f"{default:.3f}"))
-            self.params_table.setItem(i, 2, QTableWidgetItem("-"))
 
     def refresh_dashboard(self):
         """Refresh dashboard statistics"""
@@ -2177,69 +2507,6 @@ class MainWindow(QWidget):
         """Stop continuous collection"""
         pass
 
-    def run_calibration(self):
-        """Run calibration"""
-        network_file, route_file = self.find_latest_files()
-        
-        if not network_file or not route_file:
-            QMessageBox.warning(
-                self, "Files Required",
-                "Run a simulation first to generate network and routes!"
-            )
-            return
-        
-        mode = 'quick' if 'Quick' in self.calib_mode_combo.currentText() else 'full'
-        
-        reply = QMessageBox.question(
-            self, "Confirm Calibration",
-            f"Run {mode} calibration?\n"
-            f"This will take {'~20 minutes' if mode == 'quick' else '1-2 hours'}.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            self.calib_progress_label.setText("Running calibration...")
-            self.worker = CalibrationWorker(network_file, route_file, mode)
-            self.worker.progress.connect(self.calib_progress_label.setText)
-            self.worker.finished.connect(self.on_calibration_finished)
-            self.worker.start()
-            
-            self.run_calib_btn.setEnabled(False)
-            self.stop_calib_btn.setEnabled(True)
-
-    def on_calibration_finished(self, result):
-        """Handle calibration completion"""
-        self.run_calib_btn.setEnabled(True)
-        self.stop_calib_btn.setEnabled(False)
-        
-        if result and 'best_error' in result:
-            self.calib_error_label.setText(f"Calibrated Error: {result['best_error']:.2f}%")
-            self.calib_status_label.setText("Status: ✅ Calibrated")
-            
-            if 'best_params' in result:
-                for i in range(self.params_table.rowCount()):
-                    param = self.params_table.item(i, 0).text()
-                    if param in result['best_params']:
-                        value = result['best_params'][param]
-                        self.params_table.setItem(i, 2, QTableWidgetItem(f"{value:.3f}"))
-            
-            QMessageBox.information(
-                self, "Calibration Complete",
-                f"Calibration completed!\n"
-                f"Error improved to: {result['best_error']:.2f}%"
-            )
-
-    def load_calibration(self):
-        """Load saved calibration parameters"""
-        filename = "data/calibration/best_params.txt"
-        if os.path.exists(filename):
-            with open(filename, 'r') as f:
-                content = f.read()
-            self.calib_results.setText(content)
-            QMessageBox.information(self, "Loaded", "Calibration parameters loaded!")
-        else:
-            QMessageBox.warning(self, "Not Found", "No saved calibration found!")
-
     def train_ai_predictor(self):
         """Train AI predictor"""
         try:
@@ -2328,11 +2595,325 @@ class MainWindow(QWidget):
         filename, _ = QFileDialog.getSaveFileName(
             self, "Export Results", "results.txt", "Text Files (*.txt);;All Files (*)"
         )
-        
+
         if filename:
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(self.comparison_text.toPlainText())
             QMessageBox.information(self, "Exported", f"Results exported to {filename}")
+
+    # ============== ROUTE ESTIMATION FUNCTIONS ==============
+
+    def run_targeted_simulation(self):
+        """Run a simulation with routes targeting the selected origin/destination"""
+        try:
+            # Check if points are selected
+            if not self.route_origin or not self.route_destination:
+                QMessageBox.warning(self, "No Points Selected",
+                    "Please select origin and destination points on the map first.")
+                return
+
+            # Get network file
+            network_file, _ = self.find_latest_files()
+            if not network_file or not os.path.exists(network_file):
+                QMessageBox.warning(self, "No Network Found",
+                    "Please build a network first by going to the Setup tab and clicking 'Build Network'.")
+                return
+
+            # Ask user for simulation parameters
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Targeted Simulation Parameters")
+            dialog_layout = QVBoxLayout(dialog)
+
+            dialog_layout.addWidget(QLabel("Configure the targeted simulation to collect data on your selected route:"))
+
+            dialog_layout.addWidget(QLabel("\nNumber of vehicles:"))
+            num_vehicles_spin = QSpinBox()
+            num_vehicles_spin.setRange(10, 200)
+            num_vehicles_spin.setValue(50)
+            num_vehicles_spin.setToolTip("How many vehicles to send along this route")
+            dialog_layout.addWidget(num_vehicles_spin)
+
+            dialog_layout.addWidget(QLabel("\nSimulation duration (seconds):"))
+            duration_spin = QSpinBox()
+            duration_spin.setRange(300, 3600)
+            duration_spin.setValue(1800)  # 30 minutes default
+            duration_spin.setToolTip("How long to run the simulation")
+            dialog_layout.addWidget(duration_spin)
+
+            button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            button_box.accepted.connect(dialog.accept)
+            button_box.rejected.connect(dialog.reject)
+            dialog_layout.addWidget(button_box)
+
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            num_vehicles = num_vehicles_spin.value()
+            sim_duration = duration_spin.value()
+
+            # Update UI
+            self.route_estimate_text.setPlainText(
+                f"🎯 Running targeted simulation...\n\n"
+                f"Origin: {self.route_origin['lat']:.6f}, {self.route_origin['lon']:.6f}\n"
+                f"Destination: {self.route_destination['lat']:.6f}, {self.route_destination['lon']:.6f}\n"
+                f"Vehicles: {num_vehicles}\n"
+                f"Duration: {sim_duration}s ({sim_duration/60:.1f} minutes)\n\n"
+                f"Generating targeted routes..."
+            )
+            QApplication.processEvents()
+
+            # Generate targeted routes
+            route_file = generate_targeted_routes(
+                network_file,
+                os.path.join("data", "routes"),
+                self.route_origin['lat'],
+                self.route_origin['lon'],
+                self.route_destination['lat'],
+                self.route_destination['lon'],
+                sim_time=sim_duration,
+                num_vehicles=num_vehicles
+            )
+
+            if not route_file:
+                QMessageBox.critical(self, "Route Generation Failed",
+                    "Could not generate routes for the selected points. "
+                    "Make sure the points are within the simulated network area.")
+                return
+
+            self.route_estimate_text.append(f"✅ Routes generated\n\nCreating simulation config...")
+            QApplication.processEvents()
+
+            # Create simulation config
+            cfg_path = create_config(
+                network_file,
+                route_file,
+                os.path.join("data", "configs", "targeted_simulation.sumocfg"),
+                sim_time=sim_duration
+            )
+
+            self.route_estimate_text.append(f"✅ Config created\n\nRunning simulation...")
+            QApplication.processEvents()
+
+            # Run simulation
+            scenario_id = f"targeted_route_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+            run_simulation(
+                cfg_path,
+                gui=True,
+                scenario_id=scenario_id,
+                enable_digital_twin=True,
+                enable_dynamic_calibration=False  # No need for calibration on targeted sim
+            )
+
+            self.route_estimate_text.append(
+                f"\n✅ Simulation completed!\n\n"
+                f"Data has been collected for your selected route.\n"
+                f"Now click '📍 Estimate Travel Time' to get accurate results!"
+            )
+
+            QMessageBox.information(self, "Simulation Complete",
+                "Targeted simulation finished!\n\n"
+                "Your selected route now has traffic data.\n"
+                "Click 'Estimate Travel Time' to see the results.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Targeted simulation failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def estimate_route_time(self):
+        """Estimate travel time between two points using simulation data"""
+        try:
+            # Check if points are selected
+            if not self.route_origin or not self.route_destination:
+                QMessageBox.warning(self, "No Points Selected",
+                    "Please click on the map to select origin (green) and destination (red) points first.")
+                return
+
+            # Get coordinates from selected points
+            from_lat = self.route_origin['lat']
+            from_lon = self.route_origin['lon']
+            to_lat = self.route_destination['lat']
+            to_lon = self.route_destination['lon']
+
+            # Get latest network file
+            net_file, _ = self.find_latest_files()
+            if not net_file:
+                QMessageBox.warning(self, "No Network",
+                    "No network file found. Please run a simulation first.")
+                return
+
+            # Get latest scenario ID from simulation results
+            cursor = self.db.conn.cursor()
+            cursor.execute("SELECT DISTINCT scenario_id FROM simulation_results ORDER BY timestamp DESC LIMIT 1")
+            result = cursor.fetchone()
+            if not result:
+                # Try calibration_params table
+                cursor.execute("SELECT DISTINCT scenario_id FROM calibration_params ORDER BY timestamp DESC LIMIT 1")
+                result = cursor.fetchone()
+            scenario_id = result['scenario_id'] if result else "latest_simulation"
+
+            self.route_estimate_text.setText("🔄 Calculating route...")
+            QApplication.processEvents()
+
+            # Create estimator and find route
+            from modules.route_estimator import RouteEstimator
+            estimator = RouteEstimator(net_file, scenario_id)
+
+            result = estimator.find_route(from_lat, from_lon, to_lat, to_lon)
+
+            if not result or not result.get('success'):
+                self.route_estimate_text.setText(
+                    "❌ Could not find a route between these points.\n"
+                    "Make sure both points are within the simulated area and on valid roads."
+                )
+                return
+
+            # Format results
+            text = "=" * 60 + "\n"
+            text += "📍 ROUTE ESTIMATION (Based on Simulation Data)\n"
+            text += "=" * 60 + "\n\n"
+
+            text += f"Origin:      {from_lat:.6f}, {from_lon:.6f}\n"
+            text += f"Destination: {to_lat:.6f}, {to_lon:.6f}\n\n"
+
+            text += "🚗 ESTIMATED TRAVEL:\n"
+            text += f"  Distance:     {result['distance_km']:.2f} km\n"
+            text += f"  Travel Time:  {int(result['travel_time_minutes'])} min {int((result['travel_time_minutes'] % 1) * 60)} sec\n"
+            text += f"  Avg Speed:    {result['average_speed_kmh']:.1f} km/h\n\n"
+
+            text += "📊 ROUTE DETAILS:\n"
+            text += f"  Number of edges:     {result['num_edges']}\n"
+            text += f"  Edges with sim data: {result['edges_with_sim_data']} ({result['data_coverage']:.1f}%)\n"
+            text += f"  Route factor:        {result['route_factor']:.2f}x (vs straight line)\n\n"
+
+            if result['data_coverage'] < 80:
+                text += "⚠️ Note: Less than 80% of route has simulation data.\n"
+                text += "   Some speeds estimated using defaults.\n\n"
+
+            text += "💡 Tip: Compare with Google Maps to see accuracy!\n"
+
+            self.route_estimate_text.setText(text)
+            self.log(f"Route estimated: {result['distance_km']:.2f} km in {result['travel_time_minutes']:.1f} min", "SUCCESS")
+
+        except Exception as e:
+            self.route_estimate_text.setText(f"❌ Error: {str(e)}")
+            self.log(f"Route estimation error: {str(e)}", "ERROR")
+            import traceback
+            traceback.print_exc()
+
+    def compare_route_with_google(self):
+        """Compare simulation estimate with Google Maps real-time data"""
+        try:
+            # Check if points are selected
+            if not self.route_origin or not self.route_destination:
+                QMessageBox.warning(self, "No Points Selected",
+                    "Please click on the map to select origin (green) and destination (red) points first.")
+                return
+
+            # Check API key
+            if not self.api_key:
+                QMessageBox.warning(self, "No API Key",
+                    "Please configure your Google Maps API key in the Data Collection tab first.")
+                return
+
+            # Get coordinates from selected points
+            from_lat = self.route_origin['lat']
+            from_lon = self.route_origin['lon']
+            to_lat = self.route_destination['lat']
+            to_lon = self.route_destination['lon']
+
+            # Get latest network file
+            net_file, _ = self.find_latest_files()
+            if not net_file:
+                QMessageBox.warning(self, "No Network",
+                    "No network file found. Please run a simulation first.")
+                return
+
+            # Get latest scenario ID from simulation results
+            cursor = self.db.conn.cursor()
+            cursor.execute("SELECT DISTINCT scenario_id FROM simulation_results ORDER BY timestamp DESC LIMIT 1")
+            result = cursor.fetchone()
+            if not result:
+                # Try calibration_params table
+                cursor.execute("SELECT DISTINCT scenario_id FROM calibration_params ORDER BY timestamp DESC LIMIT 1")
+                result = cursor.fetchone()
+            scenario_id = result['scenario_id'] if result else "latest_simulation"
+
+            self.route_estimate_text.setText("🔄 Fetching Google Maps data and calculating route...")
+            QApplication.processEvents()
+
+            # Create estimator and compare
+            from modules.route_estimator import RouteEstimator
+            estimator = RouteEstimator(net_file, scenario_id)
+
+            result = estimator.compare_with_google_maps(from_lat, from_lon, to_lat, to_lon, self.api_key)
+
+            if not result or not result.get('success'):
+                self.route_estimate_text.setText(
+                    "❌ Could not find a route between these points.\n"
+                    "Make sure both points are within the simulated area and on valid roads."
+                )
+                return
+
+            # Format comparison results
+            text = "=" * 60 + "\n"
+            text += "🌐 ROUTE ESTIMATION vs GOOGLE MAPS COMPARISON\n"
+            text += "=" * 60 + "\n\n"
+
+            text += f"Origin:      {from_lat:.6f}, {from_lon:.6f}\n"
+            text += f"Destination: {to_lat:.6f}, {to_lon:.6f}\n\n"
+
+            # Simulation results
+            text += "🖥️ SIMULATION ESTIMATE:\n"
+            text += f"  Distance:     {result['distance_km']:.2f} km\n"
+            text += f"  Travel Time:  {int(result['travel_time_minutes'])} min {int((result['travel_time_minutes'] % 1) * 60)} sec\n"
+            text += f"  Avg Speed:    {result['average_speed_kmh']:.1f} km/h\n\n"
+
+            # Google Maps results
+            if 'google_maps' in result:
+                gm = result['google_maps']
+                text += "🌐 GOOGLE MAPS (Real-time):\n"
+                text += f"  Distance:     {gm['distance_meters'] / 1000:.2f} km\n"
+                text += f"  Travel Time:  {int(gm['travel_time_minutes'])} min {int((gm['travel_time_minutes'] % 1) * 60)} sec\n"
+                text += f"  Avg Speed:    {gm['speed_kmh']:.1f} km/h\n"
+                if gm['traffic_delay_seconds'] > 0:
+                    text += f"  Traffic Delay: {int(gm['traffic_delay_seconds'] / 60)} min\n"
+                text += "\n"
+
+                # Accuracy comparison
+                if 'comparison' in result:
+                    comp = result['comparison']
+                    text += "📊 ACCURACY:\n"
+                    text += f"  Time Error:   {comp['time_error_seconds']:.0f} sec ({comp['time_error_percent']:.1f}%)\n"
+                    text += f"  Speed Error:  {comp['speed_error_kmh']:.1f} km/h ({comp['speed_error_percent']:.1f}%)\n"
+                    text += f"  Distance Err: {comp['distance_error_meters']:.0f} m\n\n"
+
+                    # Verdict
+                    if comp['time_error_percent'] < 10:
+                        text += "✅ EXCELLENT accuracy! Digital twin closely matches reality.\n"
+                    elif comp['time_error_percent'] < 20:
+                        text += "✔️ GOOD accuracy. Minor differences from real traffic.\n"
+                    elif comp['time_error_percent'] < 30:
+                        text += "⚠️ MODERATE accuracy. Some differences from real traffic.\n"
+                    else:
+                        text += "❌ Needs calibration. Consider running more simulations.\n"
+            else:
+                text += "⚠️ Could not fetch Google Maps data for comparison.\n"
+
+            text += "\n" + "=" * 60 + "\n"
+            text += f"Data coverage: {result['data_coverage']:.1f}% of route edges\n"
+
+            self.route_estimate_text.setText(text)
+            self.log(f"Route compared: {result.get('comparison', {}).get('time_error_percent', 0):.1f}% error", "SUCCESS")
+
+        except Exception as e:
+            self.route_estimate_text.setText(f"❌ Error: {str(e)}")
+            self.log(f"Route comparison error: {str(e)}", "ERROR")
+            import traceback
+            traceback.print_exc()
 
     def find_latest_files(self):
         """Find latest network and route files"""
@@ -2355,6 +2936,311 @@ class MainWindow(QWidget):
                 route_file = os.path.join(route_dir, files[-1])
         
         return network_file, route_file
+
+    # ============== ROUTE ESTIMATION MAP FUNCTIONS ==============
+
+    def init_route_map(self, center=None, zoom=12):
+        """Initialize the route estimation map with click handlers"""
+        try:
+            # Get actual network bounds from the network file
+            network_file, _ = self.find_latest_files()
+            actual_bbox = None
+
+            if network_file and os.path.exists(network_file):
+                import xml.etree.ElementTree as ET
+                try:
+                    tree = ET.parse(network_file)
+                    root = tree.getroot()
+                    location = root.find('location')
+                    if location is not None:
+                        orig_boundary = location.get('origBoundary')
+                        if orig_boundary:
+                            # Parse: "west,south,east,north"
+                            bounds = orig_boundary.split(',')
+                            if len(bounds) == 4:
+                                actual_bbox = {
+                                    'west': float(bounds[0]),
+                                    'south': float(bounds[1]),
+                                    'east': float(bounds[2]),
+                                    'north': float(bounds[3])
+                                }
+                                print(f"[DEBUG] Read network bounds from file: {actual_bbox}")
+                except Exception as e:
+                    print(f"[DEBUG] Could not read network bounds: {e}")
+
+            # Use actual network bounds if available
+            if actual_bbox:
+                center_lat = (actual_bbox['north'] + actual_bbox['south']) / 2
+                center_lon = (actual_bbox['east'] + actual_bbox['west']) / 2
+                center = [center_lat, center_lon]
+                zoom = 13
+                print(f"[DEBUG] Using actual network center: {center}")
+            elif self.selected_bbox:
+                center_lat = (self.selected_bbox['north'] + self.selected_bbox['south']) / 2
+                center_lon = (self.selected_bbox['east'] + self.selected_bbox['west']) / 2
+                center = [center_lat, center_lon]
+                zoom = 13
+                print(f"[DEBUG] Using simulated area center: {center}")
+            elif center is None:
+                center = [30.0444, 31.2357]
+                print(f"[DEBUG] Using default Cairo center: {center}")
+
+            print(f"[DEBUG] Creating folium map at {center} with zoom {zoom}")
+            m = folium.Map(
+                location=center,
+                zoom_start=zoom,
+                tiles='OpenStreetMap',
+                control_scale=True
+            )
+
+            # Add network boundary rectangle if available
+            if actual_bbox:
+                folium.Rectangle(
+                    bounds=[
+                        [actual_bbox['south'], actual_bbox['west']],
+                        [actual_bbox['north'], actual_bbox['east']]
+                    ],
+                    color='blue',
+                    fill=True,
+                    fillColor='lightblue',
+                    fillOpacity=0.2,
+                    weight=2,
+                    popup='Network Boundary - Click inside this area',
+                    tooltip='Simulated Network Area'
+                ).add_to(m)
+
+            # Add a note to click on the map
+            folium.Marker(
+                center,
+                popup='Click anywhere INSIDE THE BLUE AREA to select origin and destination',
+                icon=folium.Icon(color='blue', icon='info-sign'),
+                tooltip='Click inside the blue area to start'
+            ).add_to(m)
+
+            map_file = "route_map.html"
+            print(f"[DEBUG] Saving route map to {map_file}")
+            m.save(map_file)
+
+            file_path = os.path.abspath(map_file)
+            print(f"[DEBUG] Map saved to: {file_path}")
+            print(f"[DEBUG] File exists: {os.path.exists(file_path)}")
+
+            url = QUrl.fromLocalFile(file_path)
+            print(f"[DEBUG] Loading URL: {url.toString()}")
+            self.route_map_view.setUrl(url)
+            print(f"[DEBUG] Route map initialized at {center} with zoom {zoom}")
+
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize route map: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def on_route_map_loaded(self, ok):
+        """Called when route map finishes loading"""
+        print(f"[DEBUG] Route map loaded (success={ok}), injecting qwebchannel.js and click handler...")
+
+        if not ok:
+            print("[ERROR] Route map failed to load!")
+            return
+
+        # Load qwebchannel.js dynamically first
+        load_qwebchannel = """
+        (function() {
+            if (typeof QWebChannel === 'undefined') {
+                var script = document.createElement('script');
+                script.src = 'qrc:///qtwebchannel/qwebchannel.js';
+                script.onload = function() { console.log('[ROUTE_MAP] qwebchannel.js loaded'); };
+                script.onerror = function() { console.log('[ROUTE_MAP ERROR] Failed to load qwebchannel.js'); };
+                document.head.appendChild(script);
+            }
+        })();
+        """
+        self.route_map_view.page().runJavaScript(load_qwebchannel)
+
+        # Then inject JavaScript with retry mechanism to wait for libraries to load
+        js_code = """
+        (function() {
+            var attempts = 0;
+            var maxAttempts = 200;  // Increased to 10 seconds
+
+            function setupMapClickHandler() {
+                attempts++;
+
+                // Debug: Show what's available
+                if (attempts === 1) {
+                    console.log('[ROUTE_MAP] Checking for map object...');
+                    console.log('[ROUTE_MAP] Window keys:', Object.keys(window).filter(k => k.includes('map') || k.includes('Map')));
+                }
+
+                // Check if QWebChannel is available
+                if (typeof QWebChannel === 'undefined') {
+                    if (attempts < maxAttempts) {
+                        setTimeout(setupMapClickHandler, 50);
+                    } else {
+                        console.log('[ROUTE_MAP ERROR] QWebChannel not loaded after ' + maxAttempts + ' attempts');
+                    }
+                    return;
+                }
+
+                // Try to find the map object - Folium creates it with a unique ID
+                var foundMap = null;
+
+                // Method 1: Check for 'map' variable
+                if (typeof map !== 'undefined') {
+                    foundMap = map;
+                    console.log('[ROUTE_MAP] Found map via global "map" variable');
+                }
+
+                // Method 2: Search for Leaflet map instances
+                if (!foundMap && typeof L !== 'undefined' && L.DomUtil) {
+                    var mapDivs = document.querySelectorAll('[id^="map"]');
+                    for (var i = 0; i < mapDivs.length; i++) {
+                        if (mapDivs[i]._leaflet_id) {
+                            // Found a Leaflet map div
+                            var mapId = mapDivs[i]._leaflet_id;
+                            // Try to get the map instance
+                            for (var key in window) {
+                                if (window[key] && window[key]._container === mapDivs[i]) {
+                                    foundMap = window[key];
+                                    console.log('[ROUTE_MAP] Found map via Leaflet container search');
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!foundMap) {
+                    if (attempts < maxAttempts) {
+                        setTimeout(setupMapClickHandler, 50);
+                    } else {
+                        console.log('[ROUTE_MAP ERROR] Map object not found after ' + maxAttempts + ' attempts');
+                        console.log('[ROUTE_MAP ERROR] Available window keys:', Object.keys(window).slice(0, 20));
+                    }
+                    return;
+                }
+
+                // Both QWebChannel and map exist, setup the bridge
+                if (typeof window.qt !== 'undefined' && typeof window.qt.webChannelTransport !== 'undefined') {
+                    new QWebChannel(window.qt.webChannelTransport, function(channel) {
+                        window.routeBridge = channel.objects.bridge;
+                        console.log('[ROUTE_MAP] ✅ Bridge connected after ' + attempts + ' attempts');
+
+                        // Add click handler to map
+                        foundMap.on('click', function(e) {
+                            var lat = e.latlng.lat;
+                            var lon = e.latlng.lng;
+                            console.log('[ROUTE_MAP] 🗺️ Map clicked at: ' + lat + ', ' + lon);
+                            window.routeBridge.receivePoint(lat, lon);
+                        });
+                        console.log('[ROUTE_MAP] ✅ Click handler registered successfully');
+                    });
+                } else {
+                    console.log('[ROUTE_MAP ERROR] Qt WebChannel transport not available');
+                }
+            }
+
+            // Start checking after a small delay to let page settle
+            setTimeout(setupMapClickHandler, 100);
+        })();
+        """
+
+        self.route_map_view.page().runJavaScript(js_code)
+        print("[DEBUG] JavaScript injected for route map")
+
+    def on_route_point_selected(self, lat, lon):
+        """Handle point selection from map"""
+        print(f"[ROUTE] Point selected: {lat}, {lon}")
+
+        if self.route_origin is None:
+            # First click - set origin
+            self.route_origin = {'lat': lat, 'lon': lon}
+            self.route_selection_label.setText(
+                f"✅ Origin selected: {lat:.6f}, {lon:.6f}\n"
+                f"👉 Now click on the map to select your destination (will appear in RED)"
+            )
+            self.route_selection_label.setStyleSheet("padding: 10px; background: #C8E6C9; border-radius: 5px; font-size: 10pt;")
+
+            # Add green marker to map
+            self.update_route_map()
+
+        elif self.route_destination is None:
+            # Second click - set destination
+            self.route_destination = {'lat': lat, 'lon': lon}
+            self.route_selection_label.setText(
+                f"✅ Route ready!\n"
+                f"🟢 Origin: {self.route_origin['lat']:.6f}, {self.route_origin['lon']:.6f}\n"
+                f"🔴 Destination: {lat:.6f}, {lon:.6f}\n"
+                f"👉 Click 'Estimate Travel Time' to get results!"
+            )
+            self.route_selection_label.setStyleSheet("padding: 10px; background: #BBDEFB; border-radius: 5px; font-size: 10pt; font-weight: bold;")
+
+            # Add both markers and line to map
+            self.update_route_map()
+
+        else:
+            # Both already selected - clear and start over
+            self.clear_route_selection()
+            self.on_route_point_selected(lat, lon)  # Treat this as new origin
+
+    def update_route_map(self):
+        """Update the route map with selected points"""
+        # Get center point
+        if self.selected_bbox:
+            center_lat = (self.selected_bbox['north'] + self.selected_bbox['south']) / 2
+            center_lon = (self.selected_bbox['east'] + self.selected_bbox['west']) / 2
+        else:
+            center_lat = 30.0444
+            center_lon = 31.2357
+
+        m = folium.Map(
+            location=[center_lat, center_lon],
+            zoom_start=13,
+            tiles='OpenStreetMap',
+            control_scale=True
+        )
+
+        # Add origin marker (green)
+        if self.route_origin:
+            folium.Marker(
+                [self.route_origin['lat'], self.route_origin['lon']],
+                popup='Origin',
+                icon=folium.Icon(color='green', icon='play', prefix='fa'),
+                tooltip='Start Point'
+            ).add_to(m)
+
+        # Add destination marker (red)
+        if self.route_destination:
+            folium.Marker(
+                [self.route_destination['lat'], self.route_destination['lon']],
+                popup='Destination',
+                icon=folium.Icon(color='red', icon='stop', prefix='fa'),
+                tooltip='End Point'
+            ).add_to(m)
+
+            # Add line between points
+            folium.PolyLine(
+                [[self.route_origin['lat'], self.route_origin['lon']],
+                 [self.route_destination['lat'], self.route_destination['lon']]],
+                color='blue',
+                weight=3,
+                opacity=0.7
+            ).add_to(m)
+
+        m.save("route_map.html")
+        url = QUrl.fromLocalFile(os.path.abspath("route_map.html"))
+        self.route_map_view.setUrl(url)
+
+    def clear_route_selection(self):
+        """Clear selected route points"""
+        self.route_origin = None
+        self.route_destination = None
+        self.route_selection_label.setText("❓ No points selected yet. Click on the map to select origin and destination.")
+        self.route_selection_label.setStyleSheet("padding: 10px; background: #FFF3E0; border-radius: 5px; font-size: 10pt;")
+        self.route_estimate_text.clear()
+
+        # Refresh map
+        self.update_route_map()
 
     # ============== ROUTE SELECTION EVENT HANDLERS ==============
 
