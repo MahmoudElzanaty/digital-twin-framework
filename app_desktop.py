@@ -221,6 +221,7 @@ class MainWindow(QWidget):
         self.map_file = "map.html"
         self.area_map_file = "area_map.html"
         self.selected_bbox = None
+        self.selected_network_file = None  # Track selected cached network file
         self.area_selected_bbox = None  # Separate bbox for area training tab
         self.current_location = None
         
@@ -1757,6 +1758,7 @@ class MainWindow(QWidget):
         try:
             coords = json.loads(data)
             self.selected_bbox = coords
+            self.selected_network_file = None  # Clear cached network when drawing new area
             print(f"[DEBUG] Parsed coordinates: {coords}")
 
             # Calculate approximate area
@@ -1791,6 +1793,7 @@ class MainWindow(QWidget):
     def on_clear_selection(self):
         """Clear the current selection"""
         self.selected_bbox = None
+        self.selected_network_file = None  # Clear selected cached network
         self.selection_label.setText("📌 No area selected")
         self.selection_label.setStyleSheet("")
         self.clear_btn.setEnabled(False)
@@ -2140,8 +2143,9 @@ class MainWindow(QWidget):
         cached_networks = list_widget.property("cached_networks")
         selected_cache = cached_networks[selected_index]
 
-        # Set the bbox
+        # Set the bbox and network file
         self.selected_bbox = selected_cache['bbox']
+        self.selected_network_file = selected_cache.get('net_file')  # Store the selected network file
 
         # Update UI to show loaded network
         bbox = selected_cache['bbox']
@@ -2916,25 +2920,31 @@ class MainWindow(QWidget):
             traceback.print_exc()
 
     def find_latest_files(self):
-        """Find latest network and route files"""
+        """Find latest network and route files, or use selected cached network"""
         net_dir = "data/networks"
         route_dir = "data/routes"
-        
+
         network_file = None
         route_file = None
-        
-        if os.path.exists(net_dir):
+
+        # If a specific network was selected from cache, use that
+        if self.selected_network_file and os.path.exists(self.selected_network_file):
+            network_file = self.selected_network_file
+            print(f"[DEBUG] Using selected cached network: {network_file}")
+        elif os.path.exists(net_dir):
+            # Otherwise, get the latest network file
             files = [f for f in os.listdir(net_dir) if f.endswith('.net.xml')]
             if files:
                 files.sort(key=lambda x: os.path.getmtime(os.path.join(net_dir, x)))
                 network_file = os.path.join(net_dir, files[-1])
-        
+                print(f"[DEBUG] Using latest network file: {network_file}")
+
         if os.path.exists(route_dir):
             files = [f for f in os.listdir(route_dir) if f.endswith('.rou.xml')]
             if files:
                 files.sort(key=lambda x: os.path.getmtime(os.path.join(route_dir, x)))
                 route_file = os.path.join(route_dir, files[-1])
-        
+
         return network_file, route_file
 
     # ============== ROUTE ESTIMATION MAP FUNCTIONS ==============
