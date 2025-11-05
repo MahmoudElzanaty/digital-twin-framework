@@ -107,8 +107,9 @@ def find_edges_near_point(net_file: str, lat: float, lon: float, max_distance: f
 def generate_targeted_routes(net_file: str, output_dir: str,
                             origin_lat: float, origin_lon: float,
                             dest_lat: float, dest_lon: float,
-                            sim_time: int = 1800, num_vehicles: int = 50) -> Optional[str]:
-    """Generate routes targeting specific origin/destination area for data collection"""
+                            sim_time: int = 1800, num_vehicles: int = 50,
+                            calibration_params: dict = None) -> Optional[str]:
+    """Generate routes targeting specific origin/destination area for data collection with calibration"""
 
     print(f"[DEMAND_GEN] Generating targeted routes from {origin_lat},{origin_lon} to {dest_lat},{dest_lon}")
 
@@ -126,13 +127,38 @@ def generate_targeted_routes(net_file: str, output_dir: str,
 
     print(f"[DEMAND_GEN] Origin area: {len(origin_edges)} edges, Destination area: {len(dest_edges)} edges")
 
+    # Use calibration parameters or defaults
+    if calibration_params:
+        speed_factor = calibration_params.get('speedFactor', 1.0)
+        speed_dev = calibration_params.get('speedDev', 0.1)
+        sigma = calibration_params.get('sigma', 0.5)
+        tau = calibration_params.get('tau', 1.0)
+        print(f"[DEMAND_GEN] Using calibrated parameters: speedFactor={speed_factor:.2f}, sigma={sigma:.2f}")
+    else:
+        speed_factor = 1.0
+        speed_dev = 0.1
+        sigma = 0.5
+        tau = 1.0
+        print(f"[DEMAND_GEN] Warning: No calibration params provided, using defaults")
+
     # Create trips file
     trips_file = os.path.join(output_dir, "targeted_trips.trips.xml")
     route_file = os.path.join(output_dir, "targeted_routes.rou.xml")
 
-    # Generate trip combinations
+    # Generate trip combinations with calibrated vType
     import random
     trips_content = ['<trips>']
+
+    # Add calibrated vehicle type definition
+    trips_content.append(
+        f'    <vType id="calibrated_car" '
+        f'speedFactor="{speed_factor:.3f}" '
+        f'speedDev="{speed_dev:.3f}" '
+        f'sigma="{sigma:.3f}" '
+        f'tau="{tau:.3f}" '
+        f'vClass="passenger" '
+        f'carFollowModel="Krauss"/>'
+    )
 
     depart_time = 0
     time_increment = sim_time / num_vehicles  # Spread vehicles over simulation time
@@ -143,7 +169,7 @@ def generate_targeted_routes(net_file: str, output_dir: str,
         to_edge = random.choice(dest_edges)
 
         trips_content.append(
-            f'    <trip id="targeted_{i}" depart="{depart_time:.1f}" '
+            f'    <trip id="targeted_{i}" type="calibrated_car" depart="{depart_time:.1f}" '
             f'from="{from_edge}" to="{to_edge}" '
             f'departLane="best" departSpeed="max"/>'
         )

@@ -65,7 +65,19 @@ class SimulationWorker(QThread):
     def run(self):
         try:
             self.progress.emit("Running simulation...")
-            run_simulation(self.cfg_file, gui=False, scenario_id=self.scenario_id)
+
+            # Get Cairo traffic parameters for realistic simulation
+            from modules.traffic_configurator import TrafficConfigurator
+            configurator = TrafficConfigurator()
+            cairo_params = configurator.configure_cairo_parameters(avg_speed_kmh=40.0)
+
+            run_simulation(
+                self.cfg_file,
+                gui=False,
+                scenario_id=self.scenario_id,
+                enable_dynamic_calibration=True,
+                initial_params=cairo_params
+            )
             self.progress.emit("Simulation complete!")
             self.finished.emit(self.scenario_id)
         except Exception as e:
@@ -2609,6 +2621,7 @@ class MainWindow(QWidget):
 
     def run_targeted_simulation(self):
         """Run a simulation with routes targeting the selected origin/destination"""
+        import os
         try:
             # Check if points are selected
             if not self.route_origin or not self.route_destination:
@@ -2617,58 +2630,194 @@ class MainWindow(QWidget):
                 return
 
             # Get network file
-            network_file, _ = self.find_latest_files()
-            if not network_file or not os.path.exists(network_file):
+            original_network_file, _ = self.find_latest_files()
+            if not original_network_file or not os.path.exists(original_network_file):
                 QMessageBox.warning(self, "No Network Found",
                     "Please build a network first by going to the Setup tab and clicking 'Build Network'.")
                 return
 
-            # Ask user for simulation parameters
-            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox
-
-            dialog = QDialog(self)
-            dialog.setWindowTitle("Targeted Simulation Parameters")
-            dialog_layout = QVBoxLayout(dialog)
-
-            dialog_layout.addWidget(QLabel("Configure the targeted simulation to collect data on your selected route:"))
-
-            dialog_layout.addWidget(QLabel("\nNumber of vehicles:"))
-            num_vehicles_spin = QSpinBox()
-            num_vehicles_spin.setRange(10, 200)
-            num_vehicles_spin.setValue(50)
-            num_vehicles_spin.setToolTip("How many vehicles to send along this route")
-            dialog_layout.addWidget(num_vehicles_spin)
-
-            dialog_layout.addWidget(QLabel("\nSimulation duration (seconds):"))
-            duration_spin = QSpinBox()
-            duration_spin.setRange(300, 3600)
-            duration_spin.setValue(1800)  # 30 minutes default
-            duration_spin.setToolTip("How long to run the simulation")
-            dialog_layout.addWidget(duration_spin)
-
-            button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-            button_box.accepted.connect(dialog.accept)
-            button_box.rejected.connect(dialog.reject)
-            dialog_layout.addWidget(button_box)
-
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            # Check API key first
+            if not self.api_key:
+                QMessageBox.warning(self, "No API Key",
+                    "Please configure your Google Maps API key in the Data Collection tab first.\n\n"
+                    "The API key is needed to fetch real-world traffic data for auto-calibration.")
                 return
 
-            num_vehicles = num_vehicles_spin.value()
-            sim_duration = duration_spin.value()
-
-            # Update UI
+            # Step 1: Fetch real-world traffic data from Google Maps FIRST
             self.route_estimate_text.setPlainText(
-                f"🎯 Running targeted simulation...\n\n"
+                f"🌐 Fetching real-world traffic data from Google Maps...\n\n"
                 f"Origin: {self.route_origin['lat']:.6f}, {self.route_origin['lon']:.6f}\n"
                 f"Destination: {self.route_destination['lat']:.6f}, {self.route_destination['lon']:.6f}\n"
-                f"Vehicles: {num_vehicles}\n"
-                f"Duration: {sim_duration}s ({sim_duration/60:.1f} minutes)\n\n"
-                f"Generating targeted routes..."
             )
             QApplication.processEvents()
 
-            # Generate targeted routes
+            from modules.data_collector import TrafficDataCollector
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox
+
+            collector = TrafficDataCollector(self.api_key)
+
+            try:
+                real_data = collector.fetch_route_traffic(
+                    origin_lat=self.route_origin['lat'],
+                    origin_lon=self.route_origin['lon'],
+                    dest_lat=self.route_destination['lat'],
+                    dest_lon=self.route_destination['lon'],
+                    route_id=None
+                )
+
+                if not real_data or 'speed_kmh' not in real_data:
+                    QMessageBox.warning(self, "API Error",
+                        "Could not fetch traffic data from Google Maps.\n"
+                        "Please check your API key and internet connection.")
+                    return
+
+                real_world_speed = real_data['speed_kmh']
+                real_travel_time = real_data['travel_time_seconds']
+                real_distance = real_data['distance_meters'] / 1000.0  # Convert to km
+
+                # Step 2: Auto-calculate optimal simulation parameters based on real traffic
+                # Vehicle count based on congestion level
+                if real_world_speed < 25:
+                    num_vehicles = 150  # Severe congestion
+                    congestion_desc = "SEVERE CONGESTION (gridlock)"
+                elif real_world_speed < 35:
+                    num_vehicles = 120  # Heavy congestion
+                    congestion_desc = "HEAVY CONGESTION"
+                elif real_world_speed < 45:
+                    num_vehicles = 80  # Moderate congestion (typical Cairo)
+                    congestion_desc = "MODERATE CONGESTION"
+                elif real_world_speed < 55:
+                    num_vehicles = 50  # Light congestion
+                    congestion_desc = "LIGHT CONGESTION"
+                else:
+                    num_vehicles = 30  # Free flow
+                    congestion_desc = "FREE FLOW"
+
+                # Simulation duration: 3x real travel time to ensure enough data collection
+                # Minimum 10 minutes, maximum 30 minutes
+                sim_duration = max(600, min(1800, int(real_travel_time * 3)))
+
+                self.route_estimate_text.append(
+                    f"\n✅ Google Maps Data Retrieved:\n"
+                    f"   Distance: {real_distance:.2f} km\n"
+                    f"   Travel Time: {real_travel_time/60:.1f} minutes\n"
+                    f"   Average Speed: {real_world_speed:.1f} km/h\n"
+                    f"   Traffic Level: {congestion_desc}\n\n"
+                    f"📊 Auto-Calculated Simulation Parameters:\n"
+                    f"   Vehicles: {num_vehicles} (based on congestion)\n"
+                    f"   Duration: {sim_duration}s ({sim_duration/60:.1f} min)\n"
+                )
+                QApplication.processEvents()
+
+                # Step 3: Show confirmation dialog with auto-calculated values (allow override)
+                dialog = QDialog(self)
+                dialog.setWindowTitle("Confirm Simulation Parameters")
+                dialog_layout = QVBoxLayout(dialog)
+
+                dialog_layout.addWidget(QLabel(
+                    f"📊 Auto-calculated parameters based on real-world traffic:\n\n"
+                    f"Real-world conditions:\n"
+                    f"  • Speed: {real_world_speed:.1f} km/h ({congestion_desc})\n"
+                    f"  • Travel time: {real_travel_time/60:.1f} minutes\n"
+                    f"  • Distance: {real_distance:.2f} km\n\n"
+                    f"You can adjust if needed:"
+                ))
+
+                dialog_layout.addWidget(QLabel("\nNumber of vehicles:"))
+                num_vehicles_spin = QSpinBox()
+                num_vehicles_spin.setRange(10, 200)
+                num_vehicles_spin.setValue(num_vehicles)
+                num_vehicles_spin.setToolTip(f"Auto-calculated from traffic level ({congestion_desc})")
+                dialog_layout.addWidget(num_vehicles_spin)
+
+                dialog_layout.addWidget(QLabel("\nSimulation duration (seconds):"))
+                duration_spin = QSpinBox()
+                duration_spin.setRange(300, 3600)
+                duration_spin.setValue(sim_duration)
+                duration_spin.setToolTip("Auto-calculated: 3x real travel time for data collection")
+                dialog_layout.addWidget(duration_spin)
+
+                button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+                button_box.accepted.connect(dialog.accept)
+                button_box.rejected.connect(dialog.reject)
+                dialog_layout.addWidget(button_box)
+
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    return
+
+                num_vehicles = num_vehicles_spin.value()
+                sim_duration = duration_spin.value()
+
+            except Exception as e:
+                QMessageBox.critical(self, "Error",
+                    f"Failed to fetch Google Maps data: {str(e)}\n\n"
+                    f"Please check your API key and internet connection.")
+                import traceback
+                traceback.print_exc()
+                return
+
+            # Update UI
+            self.route_estimate_text.append(
+                f"\n🎯 Starting targeted simulation...\n"
+                f"Vehicles: {num_vehicles}\n"
+                f"Duration: {sim_duration}s ({sim_duration/60:.1f} minutes)\n\n"
+                f"🧹 Clearing old simulation data..."
+            )
+            QApplication.processEvents()
+
+            # Clear old simulation data to ensure clean calibration
+            edge_log = "data/logs/edge_state.csv"
+            if os.path.exists(edge_log):
+                try:
+                    os.remove(edge_log)
+                    self.route_estimate_text.append(f"✅ Old data cleared\n\n")
+                    print("[TARGETED_SIM] Cleared old edge_state.csv")
+                except Exception as e:
+                    print(f"[TARGETED_SIM] Warning: Could not clear old data: {e}")
+                    self.route_estimate_text.append(f"⚠️ Could not clear old data\n\n")
+
+            # Calculate Cairo parameters based on real-world speed
+            from modules.traffic_configurator import TrafficConfigurator
+            from modules.network_calibrator import calibrate_network_speeds
+
+            configurator = TrafficConfigurator()
+            cairo_params = configurator.configure_cairo_parameters(avg_speed_kmh=real_world_speed)
+
+            self.route_estimate_text.append(
+                f"📊 Calibrating network to real-world speeds...\n"
+                f"   Target speed: {real_world_speed:.1f} km/h\n"
+            )
+            QApplication.processEvents()
+
+            # CRITICAL: Calibrate network edge speeds to match real-world traffic
+            # Create calibrated network with realistic speed limits
+            calibrated_network_file = original_network_file.replace('.net.xml', '_calibrated.net.xml')
+            try:
+                calibrate_network_speeds(
+                    network_file=original_network_file,
+                    target_speed_kmh=real_world_speed,
+                    output_file=calibrated_network_file
+                )
+                network_file = calibrated_network_file  # Use calibrated network
+
+                self.route_estimate_text.append(
+                    f"✅ Network calibrated successfully!\n"
+                    f"   Speed limits adjusted to match real-world conditions\n\n"
+                    f"📊 Vehicle parameters calculated:\n"
+                    f"   Speed factor: {cairo_params['speedFactor']:.2f}\n\n"
+                    f"Generating calibrated routes..."
+                )
+            except Exception as e:
+                print(f"[TARGETED_SIM] Warning: Network calibration failed: {e}")
+                network_file = original_network_file  # Fallback to original
+                self.route_estimate_text.append(
+                    f"⚠️ Network calibration failed, using original network\n\n"
+                    f"Generating routes..."
+                )
+
+            QApplication.processEvents()
+
+            # Generate targeted routes WITH calibration parameters
             route_file = generate_targeted_routes(
                 network_file,
                 os.path.join("data", "routes"),
@@ -2677,7 +2826,8 @@ class MainWindow(QWidget):
                 self.route_destination['lat'],
                 self.route_destination['lon'],
                 sim_time=sim_duration,
-                num_vehicles=num_vehicles
+                num_vehicles=num_vehicles,
+                calibration_params=cairo_params  # Pass calibration to route generation!
             )
 
             if not route_file:
@@ -2697,18 +2847,23 @@ class MainWindow(QWidget):
                 sim_time=sim_duration
             )
 
-            self.route_estimate_text.append(f"✅ Config created\n\nRunning simulation...")
+            self.route_estimate_text.append(f"✅ Config created\n\n🚗 Running calibrated simulation...")
             QApplication.processEvents()
 
-            # Run simulation
+            # Use calibration parameters already calculated earlier
             scenario_id = f"targeted_route_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+            print(f"[TARGETED_SIM] Using real-world calibrated parameters")
+            print(f"[TARGETED_SIM] Real-world speed: {real_world_speed:.1f} km/h")
+            print(f"[TARGETED_SIM] Speed factor: {cairo_params['speedFactor']:.2f}")
 
             run_simulation(
                 cfg_path,
                 gui=True,
                 scenario_id=scenario_id,
                 enable_digital_twin=True,
-                enable_dynamic_calibration=False  # No need for calibration on targeted sim
+                enable_dynamic_calibration=True,  # Enable real-time calibration
+                initial_params=cairo_params  # Use real-world calibrated parameters
             )
 
             self.route_estimate_text.append(
@@ -2729,6 +2884,7 @@ class MainWindow(QWidget):
 
     def estimate_route_time(self):
         """Estimate travel time between two points using simulation data"""
+        import os
         try:
             # Check if points are selected
             if not self.route_origin or not self.route_destination:
@@ -2774,6 +2930,58 @@ class MainWindow(QWidget):
                     "Make sure both points are within the simulated area and on valid roads."
                 )
                 return
+
+            # Check if data is uncalibrated (speeds too high = old data)
+            avg_speed = result['average_speed_kmh']
+            if avg_speed > 70:
+                # Uncalibrated data detected!
+                from PyQt6.QtWidgets import QMessageBox
+                reply = QMessageBox.warning(
+                    self,
+                    "⚠️ Uncalibrated Simulation Data Detected",
+                    f"The simulation data shows unrealistic speeds ({avg_speed:.1f} km/h).\n\n"
+                    f"This means you're using OLD simulation data from before calibration was added.\n\n"
+                    f"What you need to do:\n"
+                    f"1. Delete old simulation data (edge_state.csv)\n"
+                    f"2. Run a NEW 'Targeted Simulation' with your selected route\n"
+                    f"3. The new simulation will be calibrated to match real-world speeds\n\n"
+                    f"Would you like me to clear the old data now?\n"
+                    f"(You'll need to run a new simulation after this)",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                )
+
+                if reply == QMessageBox.StandardButton.Yes:
+                    # Clear old simulation data
+                    edge_log = "data/logs/edge_state.csv"
+                    if os.path.exists(edge_log):
+                        try:
+                            os.remove(edge_log)
+                            QMessageBox.information(
+                                self,
+                                "Data Cleared",
+                                "✅ Old simulation data has been deleted.\n\n"
+                                "Now click 'Run Targeted Simulation' to generate new calibrated data."
+                            )
+                            self.route_estimate_text.setText(
+                                "⚠️ Old uncalibrated data has been cleared.\n\n"
+                                "Please run a NEW 'Targeted Simulation' to generate calibrated data:\n"
+                                "1. Select origin and destination on map (already done ✓)\n"
+                                "2. Click 'Run Targeted Simulation' button\n"
+                                "3. System will fetch Google Maps data and calibrate automatically\n"
+                                "4. Then click 'Estimate Travel Time' again"
+                            )
+                            return
+                        except Exception as e:
+                            QMessageBox.critical(self, "Error", f"Could not delete old data: {e}")
+                    else:
+                        QMessageBox.information(
+                            self,
+                            "No Old Data",
+                            "No old edge_state.csv found.\n\n"
+                            "Please run 'Targeted Simulation' to generate new data."
+                        )
+                        return
 
             # Format results
             text = "=" * 60 + "\n"
