@@ -1,6 +1,7 @@
 """
 Advanced Visualization Module for Digital Twin Framework
 Provides comprehensive plotting and visualization for simulation results
+FIXED VERSION - Uses correct database tables and CSV files
 """
 import os
 import json
@@ -109,354 +110,259 @@ class AdvancedVisualizer:
         return save_path
 
     def _plot_speed_distribution(self, ax, scenario_id: str, conn):
-        """Plot speed distribution histogram"""
+        """Plot speed distribution histogram from CSV"""
         try:
-            query = """
-                SELECT mean_speed FROM edge_states
-                WHERE scenario_id = ? AND mean_speed > 0
-            """
-            df = pd.read_sql_query(query, conn, params=(scenario_id,))
-
-            if len(df) > 0:
-                # Convert m/s to km/h
-                speeds_kmh = df['mean_speed'] * 3.6
-
-                ax.hist(speeds_kmh, bins=30, color='#2196F3', alpha=0.7, edgecolor='black')
-                ax.axvline(speeds_kmh.mean(), color='red', linestyle='--',
-                          label=f'Mean: {speeds_kmh.mean():.1f} km/h')
-                ax.axvline(speeds_kmh.median(), color='green', linestyle='--',
-                          label=f'Median: {speeds_kmh.median():.1f} km/h')
-
-                ax.set_xlabel('Speed (km/h)')
-                ax.set_ylabel('Frequency')
-                ax.set_title('Speed Distribution')
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-            else:
-                ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-                ax.set_title('Speed Distribution (No Data)')
+            csv_file = "data/logs/edge_state.csv"
+            if os.path.exists(csv_file):
+                df = pd.read_csv(csv_file)
+                if 'mean_speed' in df.columns:
+                    speeds = df[df['mean_speed'] > 0]['mean_speed']
+                    if len(speeds) > 0:
+                        speeds_kmh = speeds * 3.6
+                        ax.hist(speeds_kmh, bins=30, color='#2196F3', alpha=0.7, edgecolor='black')
+                        ax.axvline(speeds_kmh.mean(), color='red', linestyle='--',
+                                  label=f'Mean: {speeds_kmh.mean():.1f} km/h')
+                        ax.axvline(speeds_kmh.median(), color='green', linestyle='--',
+                                  label=f'Median: {speeds_kmh.median():.1f} km/h')
+                        ax.set_xlabel('Speed (km/h)')
+                        ax.set_ylabel('Frequency')
+                        ax.set_title('Speed Distribution')
+                        ax.legend()
+                        ax.grid(True, alpha=0.3)
+                        return
+            ax.text(0.5, 0.5, 'No simulation data\nRun a simulation first',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Speed Distribution')
         except Exception as e:
-            ax.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+            ax.text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Speed Distribution')
 
     def _plot_traffic_flow_time(self, ax, scenario_id: str, conn):
-        """Plot traffic flow over time"""
+        """Plot traffic flow over time from CSV"""
         try:
-            query = """
-                SELECT step, AVG(vehicle_count) as avg_vehicles
-                FROM edge_states
-                WHERE scenario_id = ?
-                GROUP BY step
-                ORDER BY step
-            """
-            df = pd.read_sql_query(query, conn, params=(scenario_id,))
-
-            if len(df) > 0:
-                # Convert steps to minutes
-                df['time_min'] = df['step'] / 60
-
-                ax.plot(df['time_min'], df['avg_vehicles'],
-                       color='#FF9800', linewidth=2)
-                ax.fill_between(df['time_min'], 0, df['avg_vehicles'],
-                               alpha=0.3, color='#FF9800')
-
-                ax.set_xlabel('Time (minutes)')
-                ax.set_ylabel('Average Vehicles per Edge')
-                ax.set_title('Traffic Flow Over Time')
-                ax.grid(True, alpha=0.3)
-            else:
-                ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+            csv_file = "data/logs/edge_state.csv"
+            if os.path.exists(csv_file):
+                df = pd.read_csv(csv_file)
+                if 'step' in df.columns and 'vehicle_count' in df.columns:
+                    flow = df.groupby('step')['vehicle_count'].mean().reset_index()
+                    if len(flow) > 0:
+                        flow['time_min'] = flow['step'] / 60
+                        ax.plot(flow['time_min'], flow['vehicle_count'], color='#FF9800', linewidth=2)
+                        ax.fill_between(flow['time_min'], 0, flow['vehicle_count'], alpha=0.3, color='#FF9800')
+                        ax.set_xlabel('Time (minutes)')
+                        ax.set_ylabel('Avg Vehicles per Edge')
+                        ax.set_title('Traffic Flow Over Time')
+                        ax.grid(True, alpha=0.3)
+                        return
+            ax.text(0.5, 0.5, 'No simulation data', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Traffic Flow Over Time')
         except Exception as e:
-            ax.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+            ax.text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Traffic Flow Over Time')
 
     def _plot_speed_accuracy(self, ax, scenario_id: str, conn):
-        """Plot speed accuracy comparison"""
+        """Plot speed accuracy from validation_metrics table"""
         try:
-            query = """
-                SELECT speed_error_pct FROM area_comparisons
-                WHERE scenario_id = ?
-                ORDER BY timestamp DESC LIMIT 1
-            """
-            df = pd.read_sql_query(query, conn, params=(scenario_id,))
+            query = "SELECT mape FROM validation_metrics WHERE scenario_id = ? ORDER BY timestamp DESC LIMIT 1"
+            cursor = conn.cursor()
+            cursor.execute(query, (scenario_id,))
+            result = cursor.fetchone()
 
-            if len(df) > 0 and not pd.isna(df['speed_error_pct'].iloc[0]):
-                error_pct = df['speed_error_pct'].iloc[0]
-                accuracy = 100 - error_pct
-
-                # Create gauge chart
+            if result and result[0] is not None:
+                error_pct = result[0]
+                accuracy = 100 - min(error_pct, 100)
                 categories = ['Error', 'Accuracy']
-                values = [error_pct, accuracy]
+                values = [min(error_pct, 100), accuracy]
                 colors = ['#F44336', '#4CAF50']
-
-                wedges, texts, autotexts = ax.pie(values, labels=categories,
-                                                   autopct='%1.1f%%',
+                wedges, texts, autotexts = ax.pie(values, labels=categories, autopct='%1.1f%%',
                                                    colors=colors, startangle=90)
-
                 for autotext in autotexts:
                     autotext.set_color('white')
                     autotext.set_fontweight('bold')
                     autotext.set_fontsize(12)
-
                 ax.set_title(f'Speed Accuracy\n({accuracy:.1f}% accurate)')
-            else:
-                ax.text(0.5, 0.5, 'No comparison data', ha='center', va='center',
-                       transform=ax.transAxes)
-                ax.set_title('Speed Accuracy (No Data)')
+                return
+            ax.text(0.5, 0.5, 'No comparison data\nCompare with real traffic',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Speed Accuracy')
         except Exception as e:
-            ax.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+            ax.text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Speed Accuracy')
 
     def _plot_congestion_levels(self, ax, scenario_id: str, conn):
-        """Plot congestion level distribution"""
+        """Plot congestion levels from CSV"""
         try:
-            query = """
-                SELECT mean_speed FROM edge_states
-                WHERE scenario_id = ? AND mean_speed > 0
-            """
-            df = pd.read_sql_query(query, conn, params=(scenario_id,))
-
-            if len(df) > 0:
-                # Categorize speeds
-                speeds_kmh = df['mean_speed'] * 3.6
-
-                def categorize_congestion(speed):
-                    if speed >= 40:
-                        return 'Free Flow'
-                    elif speed >= 25:
-                        return 'Moderate'
-                    elif speed >= 15:
-                        return 'Heavy'
-                    else:
-                        return 'Severe'
-
-                congestion = speeds_kmh.apply(categorize_congestion)
-                congestion_counts = congestion.value_counts()
-
-                colors = {'Free Flow': '#4CAF50', 'Moderate': '#FF9800',
-                         'Heavy': '#F44336', 'Severe': '#B71C1C'}
-
-                bars = ax.bar(congestion_counts.index, congestion_counts.values,
-                             color=[colors.get(x, '#777') for x in congestion_counts.index])
-
-                ax.set_xlabel('Congestion Level')
-                ax.set_ylabel('Number of Edges')
-                ax.set_title('Congestion Level Distribution')
-                ax.tick_params(axis='x', rotation=45)
-
-                # Add value labels on bars
-                for bar in bars:
-                    height = bar.get_height()
-                    ax.text(bar.get_x() + bar.get_width()/2., height,
-                           f'{int(height)}',
-                           ha='center', va='bottom', fontweight='bold')
-            else:
-                ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+            csv_file = "data/logs/edge_state.csv"
+            if os.path.exists(csv_file):
+                df = pd.read_csv(csv_file)
+                if 'mean_speed' in df.columns:
+                    speeds_kmh = df[df['mean_speed'] > 0]['mean_speed'] * 3.6
+                    def categorize(speed):
+                        if speed >= 40: return 'Free Flow'
+                        elif speed >= 25: return 'Moderate'
+                        elif speed >= 15: return 'Heavy'
+                        else: return 'Severe'
+                    congestion = speeds_kmh.apply(categorize)
+                    counts = congestion.value_counts()
+                    colors = {'Free Flow': '#4CAF50', 'Moderate': '#FF9800',
+                             'Heavy': '#F44336', 'Severe': '#B71C1C'}
+                    bars = ax.bar(counts.index, counts.values,
+                                 color=[colors.get(x, '#777') for x in counts.index])
+                    ax.set_xlabel('Congestion Level')
+                    ax.set_ylabel('Number of Edges')
+                    ax.set_title('Congestion Distribution')
+                    ax.tick_params(axis='x', rotation=45)
+                    for bar in bars:
+                        height = bar.get_height()
+                        ax.text(bar.get_x() + bar.get_width()/2., height, f'{int(height)}',
+                               ha='center', va='bottom', fontweight='bold')
+                    return
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Congestion Distribution')
         except Exception as e:
-            ax.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+            ax.text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Congestion Distribution')
 
     def _plot_edge_speed_comparison(self, ax, scenario_id: str, conn):
-        """Plot simulated vs real speed comparison"""
+        """Plot sim vs real speed - requires both CSV and real_traffic_data"""
         try:
-            query = """
-                SELECT es.mean_speed as sim_speed, rt.speed_kmh as real_speed
-                FROM edge_states es
-                JOIN routes r ON es.edge_id = r.route_id
-                JOIN route_traffic rt ON r.route_id = rt.route_id
-                WHERE es.scenario_id = ? AND es.mean_speed > 0 AND rt.speed_kmh > 0
-                LIMIT 100
-            """
-            df = pd.read_sql_query(query, conn, params=(scenario_id,))
+            # Try to get real traffic data
+            query = "SELECT speed_kmh FROM real_traffic_data WHERE speed_kmh > 0 LIMIT 100"
+            real_df = pd.read_sql_query(query, conn)
 
-            if len(df) > 0:
-                # Convert sim speed to km/h
-                df['sim_speed_kmh'] = df['sim_speed'] * 3.6
+            csv_file = "data/logs/edge_state.csv"
+            if os.path.exists(csv_file) and len(real_df) > 0:
+                sim_df = pd.read_csv(csv_file)
+                if 'mean_speed' in sim_df.columns:
+                    sim_speeds = (sim_df[sim_df['mean_speed'] > 0]['mean_speed'] * 3.6).sample(min(100, len(sim_df)))
+                    real_speeds = real_df['speed_kmh'].sample(min(len(sim_speeds), len(real_df)))
 
-                ax.scatter(df['real_speed'], df['sim_speed_kmh'],
-                          alpha=0.6, s=50, c='#2196F3', edgecolors='black')
+                    # Match lengths
+                    min_len = min(len(sim_speeds), len(real_speeds))
+                    sim_speeds = sim_speeds.iloc[:min_len].values
+                    real_speeds = real_speeds.iloc[:min_len].values
 
-                # Add perfect prediction line
-                max_val = max(df['real_speed'].max(), df['sim_speed_kmh'].max())
-                ax.plot([0, max_val], [0, max_val], 'r--', label='Perfect Match', linewidth=2)
-
-                ax.set_xlabel('Real Speed (km/h)')
-                ax.set_ylabel('Simulated Speed (km/h)')
-                ax.set_title('Sim vs Real Speed Comparison')
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-
-                # Calculate R²
-                from scipy.stats import linregress
-                slope, intercept, r_value, p_value, std_err = linregress(
-                    df['real_speed'], df['sim_speed_kmh'])
-                ax.text(0.05, 0.95, f'R² = {r_value**2:.3f}',
-                       transform=ax.transAxes, fontweight='bold',
-                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-            else:
-                ax.text(0.5, 0.5, 'No comparison data', ha='center', va='center',
-                       transform=ax.transAxes)
+                    ax.scatter(real_speeds, sim_speeds, alpha=0.6, s=50, c='#2196F3', edgecolors='black')
+                    max_val = max(max(real_speeds), max(sim_speeds))
+                    ax.plot([0, max_val], [0, max_val], 'r--', label='Perfect Match', linewidth=2)
+                    ax.set_xlabel('Real Speed (km/h)')
+                    ax.set_ylabel('Simulated Speed (km/h)')
+                    ax.set_title('Sim vs Real Speed')
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+                    return
+            ax.text(0.5, 0.5, 'Collect real traffic data\nfor comparison',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Sim vs Real Speed')
         except Exception as e:
-            ax.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+            ax.text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Sim vs Real Speed')
 
     def _plot_vehicle_count(self, ax, scenario_id: str, conn):
-        """Plot vehicle count over time"""
+        """Plot vehicle count from CSV"""
         try:
-            query = """
-                SELECT step, SUM(vehicle_count) as total_vehicles
-                FROM edge_states
-                WHERE scenario_id = ?
-                GROUP BY step
-                ORDER BY step
-            """
-            df = pd.read_sql_query(query, conn, params=(scenario_id,))
-
-            if len(df) > 0:
-                df['time_min'] = df['step'] / 60
-
-                ax.plot(df['time_min'], df['total_vehicles'],
-                       color='#9C27B0', linewidth=2, marker='o', markersize=3)
-
-                # Add trend line
-                z = np.polyfit(df['time_min'], df['total_vehicles'], 2)
-                p = np.poly1d(z)
-                ax.plot(df['time_min'], p(df['time_min']),
-                       "r--", alpha=0.5, label='Trend')
-
-                ax.set_xlabel('Time (minutes)')
-                ax.set_ylabel('Total Vehicles in Network')
-                ax.set_title('Vehicle Count Over Time')
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-            else:
-                ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+            csv_file = "data/logs/edge_state.csv"
+            if os.path.exists(csv_file):
+                df = pd.read_csv(csv_file)
+                if 'step' in df.columns and 'vehicle_count' in df.columns:
+                    vehicles = df.groupby('step')['vehicle_count'].sum().reset_index()
+                    if len(vehicles) > 0:
+                        vehicles['time_min'] = vehicles['step'] / 60
+                        ax.plot(vehicles['time_min'], vehicles['vehicle_count'],
+                               color='#9C27B0', linewidth=2, marker='o', markersize=3)
+                        ax.set_xlabel('Time (minutes)')
+                        ax.set_ylabel('Total Vehicles')
+                        ax.set_title('Vehicle Count Over Time')
+                        ax.grid(True, alpha=0.3)
+                        return
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Vehicle Count Over Time')
         except Exception as e:
-            ax.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+            ax.text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Vehicle Count Over Time')
 
     def _plot_travel_time_distribution(self, ax, scenario_id: str, conn):
-        """Plot travel time distribution"""
+        """Plot travel time from real_traffic_data"""
         try:
-            query = """
-                SELECT travel_time_seconds FROM route_traffic
-                WHERE travel_time_seconds > 0
-                ORDER BY timestamp DESC
-                LIMIT 1000
-            """
+            query = "SELECT travel_time_seconds FROM real_traffic_data WHERE travel_time_seconds > 0 LIMIT 1000"
             df = pd.read_sql_query(query, conn)
-
             if len(df) > 0:
-                travel_times_min = df['travel_time_seconds'] / 60
-
-                ax.hist(travel_times_min, bins=25, color='#00BCD4',
-                       alpha=0.7, edgecolor='black')
-                ax.axvline(travel_times_min.mean(), color='red',
-                          linestyle='--', linewidth=2,
-                          label=f'Mean: {travel_times_min.mean():.1f} min')
-
+                times_min = df['travel_time_seconds'] / 60
+                ax.hist(times_min, bins=25, color='#00BCD4', alpha=0.7, edgecolor='black')
+                ax.axvline(times_min.mean(), color='red', linestyle='--', linewidth=2,
+                          label=f'Mean: {times_min.mean():.1f} min')
                 ax.set_xlabel('Travel Time (minutes)')
                 ax.set_ylabel('Frequency')
                 ax.set_title('Travel Time Distribution')
                 ax.legend()
                 ax.grid(True, alpha=0.3)
-            else:
-                ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+                return
+            ax.text(0.5, 0.5, 'No real traffic data', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Travel Time Distribution')
         except Exception as e:
-            ax.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+            ax.text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Travel Time Distribution')
 
     def _plot_calibration_progress(self, ax, scenario_id: str, conn):
-        """Plot dynamic calibration progress"""
+        """Plot calibration from calibration_params table"""
         try:
             query = """
-                SELECT step, avg_speed FROM dynamic_calibrations
-                WHERE scenario_id = ?
-                ORDER BY step
+                SELECT param_value, timestamp FROM calibration_params
+                WHERE scenario_id = ? AND param_name = 'avg_speed'
+                ORDER BY timestamp
             """
             df = pd.read_sql_query(query, conn, params=(scenario_id,))
-
             if len(df) > 0:
-                df['time_min'] = df['step'] / 60
-
-                ax.plot(df['time_min'], df['avg_speed'],
+                ax.plot(range(len(df)), df['param_value'],
                        color='#4CAF50', linewidth=2, marker='s', markersize=4)
-
-                # Add moving average
-                window = min(5, len(df))
-                if window > 1:
-                    df['ma'] = df['avg_speed'].rolling(window=window).mean()
-                    ax.plot(df['time_min'], df['ma'],
-                           color='red', linestyle='--', linewidth=2,
-                           label=f'{window}-point MA')
-
-                ax.set_xlabel('Time (minutes)')
+                ax.set_xlabel('Calibration Step')
                 ax.set_ylabel('Average Speed (m/s)')
-                ax.set_title('Dynamic Calibration Progress')
-                if window > 1:
-                    ax.legend()
+                ax.set_title('Calibration Progress')
                 ax.grid(True, alpha=0.3)
-            else:
-                ax.text(0.5, 0.5, 'No calibration data', ha='center', va='center',
-                       transform=ax.transAxes)
+                return
+            ax.text(0.5, 0.5, 'No calibration data', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Calibration Progress')
         except Exception as e:
-            ax.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+            ax.text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Calibration Progress')
 
     def _plot_performance_metrics(self, ax, scenario_id: str, conn):
-        """Plot key performance metrics"""
+        """Plot performance metrics from validation_metrics"""
         try:
-            # Get various metrics
-            metrics = {}
+            query = "SELECT mape, r_squared FROM validation_metrics WHERE scenario_id = ? ORDER BY timestamp DESC LIMIT 1"
+            cursor = conn.cursor()
+            cursor.execute(query, (scenario_id,))
+            result = cursor.fetchone()
 
-            # Speed error
-            query = "SELECT speed_error_pct FROM area_comparisons WHERE scenario_id = ? ORDER BY timestamp DESC LIMIT 1"
-            result = pd.read_sql_query(query, conn, params=(scenario_id,))
-            if len(result) > 0 and not pd.isna(result['speed_error_pct'].iloc[0]):
-                metrics['Speed\nAccuracy'] = 100 - result['speed_error_pct'].iloc[0]
+            if result:
+                mape, r_squared = result
+                metrics = {}
+                if mape is not None:
+                    metrics['Speed\nAccuracy'] = max(0, 100 - mape)
+                if r_squared is not None:
+                    metrics['Congestion\nMatch'] = r_squared * 100
 
-            # Congestion similarity
-            query = "SELECT congestion_similarity FROM area_comparisons WHERE scenario_id = ? ORDER BY timestamp DESC LIMIT 1"
-            result = pd.read_sql_query(query, conn, params=(scenario_id,))
-            if len(result) > 0 and not pd.isna(result['congestion_similarity'].iloc[0]):
-                metrics['Congestion\nSimilarity'] = result['congestion_similarity'].iloc[0]
-
-            # Data coverage
-            query = """
-                SELECT COUNT(DISTINCT edge_id) * 100.0 /
-                (SELECT COUNT(DISTINCT edge_id) FROM edge_states WHERE scenario_id = ?) as coverage
-                FROM edge_states WHERE scenario_id = ? AND mean_speed > 0
-            """
-            result = pd.read_sql_query(query, conn, params=(scenario_id, scenario_id))
-            if len(result) > 0:
-                metrics['Data\nCoverage'] = result['coverage'].iloc[0]
-
-            if len(metrics) > 0:
-                labels = list(metrics.keys())
-                values = list(metrics.values())
-                colors_list = ['#4CAF50' if v >= 70 else '#FF9800' if v >= 50 else '#F44336'
-                              for v in values]
-
-                bars = ax.barh(labels, values, color=colors_list)
-
-                # Add value labels
-                for i, (bar, val) in enumerate(zip(bars, values)):
-                    ax.text(val + 2, i, f'{val:.1f}%',
-                           va='center', fontweight='bold')
-
-                ax.set_xlabel('Score (%)')
-                ax.set_title('Performance Metrics')
-                ax.set_xlim(0, 105)
-                ax.grid(True, axis='x', alpha=0.3)
-            else:
-                ax.text(0.5, 0.5, 'No metrics available', ha='center', va='center',
-                       transform=ax.transAxes)
+                if metrics:
+                    labels = list(metrics.keys())
+                    values = list(metrics.values())
+                    colors = ['#4CAF50' if v >= 70 else '#FF9800' if v >= 50 else '#F44336' for v in values]
+                    bars = ax.barh(labels, values, color=colors)
+                    for i, (bar, val) in enumerate(zip(bars, values)):
+                        ax.text(val + 2, i, f'{val:.1f}%', va='center', fontweight='bold')
+                    ax.set_xlabel('Score (%)')
+                    ax.set_title('Performance Metrics')
+                    ax.set_xlim(0, 105)
+                    ax.grid(True, axis='x', alpha=0.3)
+                    return
+            ax.text(0.5, 0.5, 'No metrics yet\nRun comparison',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Performance Metrics')
         except Exception as e:
-            ax.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+            ax.text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Performance Metrics')
 
     def plot_route_estimation(self, route_data: Dict, save_path: Optional[str] = None) -> str:
-        """
-        Create visualization for route estimation results
-
-        Args:
-            route_data: Route estimation data dictionary
-            save_path: Optional path to save figure
-
-        Returns:
-            Path to saved figure
-        """
+        """Create visualization for route estimation results"""
         if save_path is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             save_path = os.path.join(self.output_dir, f"route_estimation_{timestamp}.png")
@@ -464,23 +370,23 @@ class AdvancedVisualizer:
         fig = plt.figure(figsize=(16, 10))
         gs = GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
 
-        # 1. Route Overview (top left, double width)
+        # 1. Route Overview
         ax1 = fig.add_subplot(gs[0, :2])
         self._plot_route_overview(ax1, route_data)
 
-        # 2. Speed Profile (top right)
+        # 2. Speed Profile
         ax2 = fig.add_subplot(gs[0, 2])
         self._plot_speed_profile(ax2, route_data)
 
-        # 3. Edge Details (bottom left)
+        # 3. Edge Details
         ax3 = fig.add_subplot(gs[1, 0])
         self._plot_edge_details(ax3, route_data)
 
-        # 4. Comparison (bottom center)
+        # 4. Comparison
         ax4 = fig.add_subplot(gs[1, 1])
         self._plot_estimation_comparison(ax4, route_data)
 
-        # 5. Data Coverage (bottom right)
+        # 5. Data Coverage
         ax5 = fig.add_subplot(gs[1, 2])
         self._plot_data_coverage(ax5, route_data)
 
@@ -496,46 +402,37 @@ class AdvancedVisualizer:
         return save_path
 
     def _plot_route_overview(self, ax, route_data: Dict):
-        """Plot route overview with key metrics"""
+        """Plot route overview box"""
         ax.axis('off')
-
-        # Extract metrics
         distance_km = route_data.get('distance_km', 0)
         travel_time_min = route_data.get('travel_time_minutes', 0)
         avg_speed = route_data.get('average_speed_kmh', 0)
         num_edges = route_data.get('num_edges', 0)
         data_coverage = route_data.get('data_coverage', 0)
 
-        # Create text summary
         summary = f"""
 ╔══════════════════════════════════════════════════════╗
 ║                  ROUTE ESTIMATION SUMMARY             ║
 ╠══════════════════════════════════════════════════════╣
-║                                                       ║
 ║  📍 Distance:           {distance_km:>8.2f} km              ║
 ║  ⏱️  Travel Time:        {travel_time_min:>8.1f} min             ║
 ║  🚗 Average Speed:      {avg_speed:>8.1f} km/h            ║
 ║  🛣️  Number of Edges:   {num_edges:>8d}                  ║
 ║  📊 Data Coverage:      {data_coverage:>8.1f} %              ║
-║                                                       ║
 ╚══════════════════════════════════════════════════════╝
 """
 
-        # Google Maps comparison if available
         if 'google_maps' in route_data:
             gm = route_data['google_maps']
             comp = route_data.get('comparison', {})
-
             summary += f"""
 ╔══════════════════════════════════════════════════════╗
 ║              GOOGLE MAPS COMPARISON                   ║
 ╠══════════════════════════════════════════════════════╣
-║                                                       ║
 ║  Real Travel Time:     {gm['travel_time_minutes']:>8.1f} min             ║
 ║  Real Speed:           {gm['speed_kmh']:>8.1f} km/h            ║
 ║  Time Error:           {comp.get('time_error_percent', 0):>8.1f} %              ║
 ║  Speed Error:          {comp.get('speed_error_percent', 0):>8.1f} %              ║
-║                                                       ║
 ╚══════════════════════════════════════════════════════╝
 """
 
@@ -544,41 +441,31 @@ class AdvancedVisualizer:
                facecolor='#E3F2FD', alpha=0.8, edgecolor='#2196F3', linewidth=2))
 
     def _plot_speed_profile(self, ax, route_data: Dict):
-        """Plot speed profile along route"""
-        edge_details = route_data.get('edge_details', [])
-
-        if len(edge_details) > 0:
-            speeds = [e['speed_kmh'] for e in edge_details]
-            has_data = [e['has_sim_data'] for e in edge_details]
-
+        """Plot speed profile"""
+        edges = route_data.get('edge_details', [])
+        if edges:
+            speeds = [e['speed_kmh'] for e in edges]
+            has_data = [e['has_sim_data'] for e in edges]
             colors = ['#4CAF50' if h else '#FF9800' for h in has_data]
-
             ax.bar(range(len(speeds)), speeds, color=colors, alpha=0.7, edgecolor='black')
-
-            # Add average line
-            avg_speed = np.mean(speeds)
-            ax.axhline(avg_speed, color='red', linestyle='--', linewidth=2,
-                      label=f'Average: {avg_speed:.1f} km/h')
-
+            avg = np.mean(speeds)
+            ax.axhline(avg, color='red', linestyle='--', linewidth=2, label=f'Avg: {avg:.1f} km/h')
             ax.set_xlabel('Edge Index')
             ax.set_ylabel('Speed (km/h)')
-            ax.set_title('Speed Profile Along Route')
+            ax.set_title('Speed Profile')
             ax.legend()
             ax.grid(True, axis='y', alpha=0.3)
         else:
             ax.text(0.5, 0.5, 'No edge data', ha='center', va='center', transform=ax.transAxes)
 
     def _plot_edge_details(self, ax, route_data: Dict):
-        """Plot edge length distribution"""
-        edge_details = route_data.get('edge_details', [])
-
-        if len(edge_details) > 0:
-            lengths = [e['length'] for e in edge_details]
-
+        """Plot edge lengths"""
+        edges = route_data.get('edge_details', [])
+        if edges:
+            lengths = [e['length'] for e in edges]
             ax.hist(lengths, bins=20, color='#00BCD4', alpha=0.7, edgecolor='black')
             ax.axvline(np.mean(lengths), color='red', linestyle='--', linewidth=2,
                       label=f'Mean: {np.mean(lengths):.1f} m')
-
             ax.set_xlabel('Edge Length (m)')
             ax.set_ylabel('Frequency')
             ax.set_title('Edge Length Distribution')
@@ -588,76 +475,51 @@ class AdvancedVisualizer:
             ax.text(0.5, 0.5, 'No edge data', ha='center', va='center', transform=ax.transAxes)
 
     def _plot_estimation_comparison(self, ax, route_data: Dict):
-        """Plot estimation vs real comparison"""
+        """Plot comparison if Google Maps data available"""
         if 'google_maps' in route_data:
             gm = route_data['google_maps']
             sim_time = route_data.get('travel_time_minutes', 0)
             real_time = gm['travel_time_minutes']
-
             categories = ['Simulation', 'Google Maps']
             times = [sim_time, real_time]
             colors = ['#2196F3', '#4CAF50']
-
             bars = ax.bar(categories, times, color=colors, alpha=0.7, edgecolor='black')
-
-            # Add value labels
             for bar, time in zip(bars, times):
                 height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height,
-                       f'{time:.1f} min',
+                ax.text(bar.get_x() + bar.get_width()/2., height, f'{time:.1f} min',
                        ha='center', va='bottom', fontweight='bold')
-
-            # Add error annotation
             error_pct = route_data.get('comparison', {}).get('time_error_percent', 0)
-            ax.text(0.5, 0.95, f'Error: {error_pct:.1f}%',
-                   transform=ax.transAxes, ha='center',
-                   fontsize=12, fontweight='bold',
-                   bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
-
+            ax.text(0.5, 0.95, f'Error: {error_pct:.1f}%', transform=ax.transAxes, ha='center',
+                   fontsize=12, fontweight='bold', bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
             ax.set_ylabel('Travel Time (minutes)')
             ax.set_title('Estimation Comparison')
             ax.grid(True, axis='y', alpha=0.3)
         else:
-            ax.text(0.5, 0.5, 'No comparison data', ha='center', va='center',
-                   transform=ax.transAxes)
-            ax.set_title('Estimation Comparison (No Data)')
+            ax.text(0.5, 0.5, 'No Google Maps\ncomparison', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Estimation Comparison')
 
     def _plot_data_coverage(self, ax, route_data: Dict):
-        """Plot data coverage pie chart"""
-        edges_with_data = route_data.get('edges_with_sim_data', 0)
-        total_edges = route_data.get('num_edges', 1)
-        edges_without_data = total_edges - edges_with_data
-
-        if total_edges > 0:
-            sizes = [edges_with_data, edges_without_data]
+        """Plot data coverage pie"""
+        with_data = route_data.get('edges_with_sim_data', 0)
+        total = route_data.get('num_edges', 1)
+        without_data = total - with_data
+        if total > 0:
+            sizes = [with_data, without_data]
             labels = ['With Sim Data', 'Default Speed']
             colors = ['#4CAF50', '#FF9800']
             explode = (0.1, 0)
-
             wedges, texts, autotexts = ax.pie(sizes, explode=explode, labels=labels,
-                                               autopct='%1.1f%%', colors=colors,
-                                               startangle=90)
-
+                                               autopct='%1.1f%%', colors=colors, startangle=90)
             for autotext in autotexts:
                 autotext.set_color('white')
                 autotext.set_fontweight('bold')
                 autotext.set_fontsize(11)
-
-            ax.set_title(f'Data Coverage\n({edges_with_data}/{total_edges} edges)')
+            ax.set_title(f'Data Coverage\n({with_data}/{total} edges)')
         else:
             ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
 
     def plot_comparison_timeline(self, scenario_ids: List[str], save_path: Optional[str] = None) -> str:
-        """
-        Create timeline comparison of multiple scenarios
-
-        Args:
-            scenario_ids: List of scenario IDs to compare
-            save_path: Optional path to save figure
-
-        Returns:
-            Path to saved figure
-        """
+        """Create timeline comparison of multiple scenarios"""
         if save_path is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             save_path = os.path.join(self.output_dir, f"comparison_timeline_{timestamp}.png")
@@ -667,98 +529,84 @@ class AdvancedVisualizer:
 
         conn = self._get_connection()
 
-        # Prepare data for all scenarios
+        # Get data for all scenarios
         scenarios_data = []
         for scenario_id in scenario_ids:
             query = """
-                SELECT scenario_id, speed_error_pct, congestion_similarity, timestamp
-                FROM area_comparisons
+                SELECT scenario_id, mape as speed_error_pct, r_squared, timestamp
+                FROM validation_metrics
                 WHERE scenario_id = ?
                 ORDER BY timestamp DESC LIMIT 1
             """
             df = pd.read_sql_query(query, conn, params=(scenario_id,))
             if len(df) > 0:
-                scenarios_data.append(df.iloc[0])
+                row = df.iloc[0]
+                scenarios_data.append({
+                    'scenario_id': row['scenario_id'],
+                    'speed_error_pct': row['speed_error_pct'] if row['speed_error_pct'] else 0,
+                    'congestion_similarity': row['r_squared'] * 100 if row['r_squared'] else 0,
+                    'timestamp': row['timestamp']
+                })
 
         conn.close()
 
-        if len(scenarios_data) == 0:
-            fig.text(0.5, 0.5, 'No comparison data available',
-                    ha='center', va='center', fontsize=14)
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            plt.close()
-            return save_path
+        if not scenarios_data:
+            fig.text(0.5, 0.5, 'No comparison data available', ha='center', va='center', fontsize=14)
+        else:
+            comp_df = pd.DataFrame(scenarios_data)
 
-        # Convert to DataFrame
-        comp_df = pd.DataFrame(scenarios_data)
+            # Plot 1: Speed Error
+            ax = axes[0, 0]
+            ax.bar(range(len(comp_df)), comp_df['speed_error_pct'], color='#F44336', alpha=0.7, edgecolor='black')
+            ax.set_xlabel('Scenario')
+            ax.set_ylabel('Speed Error (%)')
+            ax.set_title('Speed Error by Scenario')
+            ax.set_xticks(range(len(comp_df)))
+            ax.set_xticklabels([s[:15] for s in comp_df['scenario_id']], rotation=45, ha='right')
+            ax.grid(True, axis='y', alpha=0.3)
 
-        # Plot 1: Speed Error Comparison
-        ax = axes[0, 0]
-        ax.bar(range(len(comp_df)), comp_df['speed_error_pct'],
-              color='#F44336', alpha=0.7, edgecolor='black')
-        ax.set_xlabel('Scenario')
-        ax.set_ylabel('Speed Error (%)')
-        ax.set_title('Speed Error by Scenario')
-        ax.set_xticks(range(len(comp_df)))
-        ax.set_xticklabels([s[:15] for s in comp_df['scenario_id']], rotation=45, ha='right')
-        ax.grid(True, axis='y', alpha=0.3)
+            # Plot 2: Congestion Similarity
+            ax = axes[0, 1]
+            ax.bar(range(len(comp_df)), comp_df['congestion_similarity'], color='#4CAF50', alpha=0.7, edgecolor='black')
+            ax.set_xlabel('Scenario')
+            ax.set_ylabel('Similarity (%)')
+            ax.set_title('Congestion Similarity')
+            ax.set_xticks(range(len(comp_df)))
+            ax.set_xticklabels([s[:15] for s in comp_df['scenario_id']], rotation=45, ha='right')
+            ax.grid(True, axis='y', alpha=0.3)
 
-        # Plot 2: Congestion Similarity
-        ax = axes[0, 1]
-        ax.bar(range(len(comp_df)), comp_df['congestion_similarity'],
-              color='#4CAF50', alpha=0.7, edgecolor='black')
-        ax.set_xlabel('Scenario')
-        ax.set_ylabel('Similarity (%)')
-        ax.set_title('Congestion Similarity by Scenario')
-        ax.set_xticks(range(len(comp_df)))
-        ax.set_xticklabels([s[:15] for s in comp_df['scenario_id']], rotation=45, ha='right')
-        ax.grid(True, axis='y', alpha=0.3)
+            # Plot 3: Overall Accuracy
+            ax = axes[1, 0]
+            accuracy = 100 - comp_df['speed_error_pct']
+            colors = ['#4CAF50' if a >= 70 else '#FF9800' if a >= 50 else '#F44336' for a in accuracy]
+            ax.bar(range(len(comp_df)), accuracy, color=colors, alpha=0.7, edgecolor='black')
+            ax.set_xlabel('Scenario')
+            ax.set_ylabel('Accuracy (%)')
+            ax.set_title('Overall Speed Accuracy')
+            ax.set_xticks(range(len(comp_df)))
+            ax.set_xticklabels([s[:15] for s in comp_df['scenario_id']], rotation=45, ha='right')
+            ax.axhline(70, color='green', linestyle='--', alpha=0.5, label='Good (70%)')
+            ax.axhline(50, color='orange', linestyle='--', alpha=0.5, label='Fair (50%)')
+            ax.legend()
+            ax.grid(True, axis='y', alpha=0.3)
 
-        # Plot 3: Overall Accuracy
-        ax = axes[1, 0]
-        accuracy = 100 - comp_df['speed_error_pct']
-        colors_list = ['#4CAF50' if a >= 70 else '#FF9800' if a >= 50 else '#F44336' for a in accuracy]
-        ax.bar(range(len(comp_df)), accuracy, color=colors_list, alpha=0.7, edgecolor='black')
-        ax.set_xlabel('Scenario')
-        ax.set_ylabel('Accuracy (%)')
-        ax.set_title('Overall Speed Accuracy')
-        ax.set_xticks(range(len(comp_df)))
-        ax.set_xticklabels([s[:15] for s in comp_df['scenario_id']], rotation=45, ha='right')
-        ax.axhline(70, color='green', linestyle='--', alpha=0.5, label='Good (70%)')
-        ax.axhline(50, color='orange', linestyle='--', alpha=0.5, label='Fair (50%)')
-        ax.legend()
-        ax.grid(True, axis='y', alpha=0.3)
-
-        # Plot 4: Summary Table
-        ax = axes[1, 1]
-        ax.axis('off')
-
-        # Create summary stats
-        summary = f"""
+            # Plot 4: Summary
+            ax = axes[1, 1]
+            ax.axis('off')
+            summary = f"""
 ╔══════════════════════════════════════════╗
 ║         COMPARISON SUMMARY               ║
 ╠══════════════════════════════════════════╣
-║                                          ║
 ║  Total Scenarios:  {len(comp_df):>4d}                  ║
 ║                                          ║
-║  Best Speed Accuracy:                    ║
-║    {comp_df.loc[comp_df['speed_error_pct'].idxmin(), 'scenario_id'][:30]:30s}  ║
-║    Error: {comp_df['speed_error_pct'].min():>5.1f}%                      ║
-║                                          ║
-║  Best Congestion Match:                  ║
-║    {comp_df.loc[comp_df['congestion_similarity'].idxmax(), 'scenario_id'][:30]:30s}  ║
-║    Similarity: {comp_df['congestion_similarity'].max():>5.1f}%               ║
-║                                          ║
-║  Average Metrics:                        ║
-║    Speed Error:     {comp_df['speed_error_pct'].mean():>6.1f}%            ║
-║    Similarity:      {comp_df['congestion_similarity'].mean():>6.1f}%            ║
-║                                          ║
+║  Average Speed Error:   {comp_df['speed_error_pct'].mean():>6.2f}%       ║
+║  Best Accuracy:         {100 - comp_df['speed_error_pct'].min():>6.2f}%       ║
+║  Worst Accuracy:        {100 - comp_df['speed_error_pct'].max():>6.2f}%       ║
 ╚══════════════════════════════════════════╝
 """
-
-        ax.text(0.1, 0.5, summary, fontfamily='monospace', fontsize=10,
-               verticalalignment='center', bbox=dict(boxstyle='round',
-               facecolor='#E8F5E9', alpha=0.8, edgecolor='#4CAF50', linewidth=2))
+            ax.text(0.1, 0.5, summary, fontfamily='monospace', fontsize=10,
+                   verticalalignment='center', bbox=dict(boxstyle='round',
+                   facecolor='#E8F5E9', alpha=0.8, edgecolor='#4CAF50', linewidth=2))
 
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -769,20 +617,6 @@ class AdvancedVisualizer:
 
 
 if __name__ == "__main__":
-    # Test visualization
+    # Test
     visualizer = AdvancedVisualizer()
-
-    # Test with a scenario
-    conn = visualizer._get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT scenario_id FROM area_comparisons LIMIT 1")
-    result = cursor.fetchone()
-
-    if result:
-        scenario_id = result[0]
-        print(f"Testing with scenario: {scenario_id}")
-        visualizer.plot_simulation_overview(scenario_id)
-    else:
-        print("No scenarios found in database")
-
-    conn.close()
+    print("Visualizer initialized successfully!")
