@@ -1481,6 +1481,55 @@ class MainWindow(QWidget):
         self.route_origin = None
         self.route_destination = None
 
+        # Data source and timing options
+        options_group = QGroupBox("Simulation & Validation Options")
+        options_layout = QVBoxLayout()
+
+        # Historical data checkbox
+        self.use_historical_data_check = QCheckBox("Use stored historical data (skip real-time API call)")
+        self.use_historical_data_check.setToolTip(
+            "When checked, uses previously collected data from database instead of fetching fresh data from Google Maps API.\n"
+            "Useful when you have already collected typical traffic patterns."
+        )
+        self.use_historical_data_check.setChecked(False)
+        options_layout.addWidget(self.use_historical_data_check)
+
+        # Validation time selection
+        time_select_layout = QHBoxLayout()
+        time_select_layout.addWidget(QLabel("Validation Time:"))
+
+        self.validation_time_combo = QComboBox()
+        self.validation_time_combo.addItems([
+            "Current time (real-time traffic)",
+            "Monday 8:00 AM (typical)",
+            "Monday 12:00 PM (typical)",
+            "Monday 5:00 PM (typical)",
+            "Monday 8:00 PM (typical)",
+            "Tuesday 8:00 AM (typical)",
+            "Tuesday 5:00 PM (typical)",
+            "Wednesday 8:00 AM (typical)",
+            "Wednesday 5:00 PM (typical)",
+            "Thursday 8:00 AM (typical)",
+            "Thursday 5:00 PM (typical)",
+            "Friday 8:00 AM (typical)",
+            "Friday 5:00 PM (typical)",
+            "Saturday 8:00 AM (typical)",
+            "Saturday 5:00 PM (typical)",
+            "Sunday 8:00 AM (typical)",
+            "Sunday 5:00 PM (typical)"
+        ])
+        self.validation_time_combo.setToolTip(
+            "Select when to validate:\n"
+            "- Current time: Fetches real-time traffic from Google Maps now\n"
+            "- Typical times: Uses typical traffic patterns for that day/time (if using historical data)"
+        )
+        time_select_layout.addWidget(self.validation_time_combo)
+        time_select_layout.addStretch()
+        options_layout.addLayout(time_select_layout)
+
+        options_group.setLayout(options_layout)
+        route_est_layout.addWidget(options_group)
+
         # Buttons
         route_btn_layout = QHBoxLayout()
 
@@ -2622,6 +2671,8 @@ class MainWindow(QWidget):
     def run_targeted_simulation(self):
         """Run a simulation with routes targeting the selected origin/destination"""
         import os
+        from datetime import datetime, timedelta
+
         try:
             # Check if points are selected
             if not self.route_origin or not self.route_destination:
@@ -2636,125 +2687,181 @@ class MainWindow(QWidget):
                     "Please build a network first by going to the Setup tab and clicking 'Build Network'.")
                 return
 
-            # Check API key first
-            if not self.api_key:
+            # Check if using historical data or real-time
+            use_historical = self.use_historical_data_check.isChecked()
+            validation_time_text = self.validation_time_combo.currentText()
+
+            # Check API key if not using historical data
+            if not use_historical and not self.api_key:
                 QMessageBox.warning(self, "No API Key",
                     "Please configure your Google Maps API key in the Data Collection tab first.\n\n"
                     "The API key is needed to fetch real-world traffic data for auto-calibration.")
                 return
 
-            # Step 1: Fetch real-world traffic data from Google Maps FIRST
-            self.route_estimate_text.setPlainText(
-                f"🌐 Fetching real-world traffic data from Google Maps...\n\n"
-                f"Origin: {self.route_origin['lat']:.6f}, {self.route_origin['lon']:.6f}\n"
-                f"Destination: {self.route_destination['lat']:.6f}, {self.route_destination['lon']:.6f}\n"
-            )
-            QApplication.processEvents()
-
-            from modules.data_collector import TrafficDataCollector
-            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox
-
-            collector = TrafficDataCollector(self.api_key)
-
-            try:
-                real_data = collector.fetch_route_traffic(
-                    origin_lat=self.route_origin['lat'],
-                    origin_lon=self.route_origin['lon'],
-                    dest_lat=self.route_destination['lat'],
-                    dest_lon=self.route_destination['lon'],
-                    route_id=None
-                )
-
-                if not real_data or 'speed_kmh' not in real_data:
-                    QMessageBox.warning(self, "API Error",
-                        "Could not fetch traffic data from Google Maps.\n"
-                        "Please check your API key and internet connection.")
-                    return
-
-                real_world_speed = real_data['speed_kmh']
-                real_travel_time = real_data['travel_time_seconds']
-                real_distance = real_data['distance_meters'] / 1000.0  # Convert to km
-
-                # Step 2: Auto-calculate optimal simulation parameters based on real traffic
-                # Vehicle count based on congestion level
-                if real_world_speed < 25:
-                    num_vehicles = 150  # Severe congestion
-                    congestion_desc = "SEVERE CONGESTION (gridlock)"
-                elif real_world_speed < 35:
-                    num_vehicles = 120  # Heavy congestion
-                    congestion_desc = "HEAVY CONGESTION"
-                elif real_world_speed < 45:
-                    num_vehicles = 80  # Moderate congestion (typical Cairo)
-                    congestion_desc = "MODERATE CONGESTION"
-                elif real_world_speed < 55:
-                    num_vehicles = 50  # Light congestion
-                    congestion_desc = "LIGHT CONGESTION"
-                else:
-                    num_vehicles = 30  # Free flow
-                    congestion_desc = "FREE FLOW"
-
-                # Simulation duration: 3x real travel time to ensure enough data collection
-                # Minimum 10 minutes, maximum 30 minutes
-                sim_duration = max(600, min(1800, int(real_travel_time * 3)))
-
-                self.route_estimate_text.append(
-                    f"\n✅ Google Maps Data Retrieved:\n"
-                    f"   Distance: {real_distance:.2f} km\n"
-                    f"   Travel Time: {real_travel_time/60:.1f} minutes\n"
-                    f"   Average Speed: {real_world_speed:.1f} km/h\n"
-                    f"   Traffic Level: {congestion_desc}\n\n"
-                    f"📊 Auto-Calculated Simulation Parameters:\n"
-                    f"   Vehicles: {num_vehicles} (based on congestion)\n"
-                    f"   Duration: {sim_duration}s ({sim_duration/60:.1f} min)\n"
+            # Step 1: Get real-world traffic data
+            if use_historical:
+                # Use stored historical data
+                self.route_estimate_text.setPlainText(
+                    f"📊 Using stored historical data from database...\n\n"
+                    f"Origin: {self.route_origin['lat']:.6f}, {self.route_origin['lon']:.6f}\n"
+                    f"Destination: {self.route_destination['lat']:.6f}, {self.route_destination['lon']:.6f}\n"
+                    f"Validation Time: {validation_time_text}\n"
                 )
                 QApplication.processEvents()
 
-                # Step 3: Show confirmation dialog with auto-calculated values (allow override)
-                dialog = QDialog(self)
-                dialog.setWindowTitle("Confirm Simulation Parameters")
-                dialog_layout = QVBoxLayout(dialog)
+                try:
+                    # Query database for historical data matching this route area
+                    real_data = self._get_historical_route_data(
+                        self.route_origin,
+                        self.route_destination,
+                        validation_time_text
+                    )
 
-                dialog_layout.addWidget(QLabel(
-                    f"📊 Auto-calculated parameters based on real-world traffic:\n\n"
-                    f"Real-world conditions:\n"
-                    f"  • Speed: {real_world_speed:.1f} km/h ({congestion_desc})\n"
-                    f"  • Travel time: {real_travel_time/60:.1f} minutes\n"
-                    f"  • Distance: {real_distance:.2f} km\n\n"
-                    f"You can adjust if needed:"
-                ))
+                    if not real_data:
+                        QMessageBox.warning(self, "No Historical Data",
+                            f"No stored data found for this route and time period.\n\n"
+                            f"Please collect data first using:\n"
+                            f"- collect_typical_network_traffic.py\n"
+                            f"- Or uncheck 'Use stored historical data' to fetch real-time data")
+                        return
 
-                dialog_layout.addWidget(QLabel("\nNumber of vehicles:"))
-                num_vehicles_spin = QSpinBox()
-                num_vehicles_spin.setRange(10, 200)
-                num_vehicles_spin.setValue(num_vehicles)
-                num_vehicles_spin.setToolTip(f"Auto-calculated from traffic level ({congestion_desc})")
-                dialog_layout.addWidget(num_vehicles_spin)
+                except Exception as e:
+                    QMessageBox.critical(self, "Error",
+                        f"Failed to retrieve historical data: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    return
+            else:
+                # Fetch real-time traffic data from Google Maps
+                self.route_estimate_text.setPlainText(
+                    f"🌐 Fetching real-time traffic data from Google Maps...\n\n"
+                    f"Origin: {self.route_origin['lat']:.6f}, {self.route_origin['lon']:.6f}\n"
+                    f"Destination: {self.route_destination['lat']:.6f}, {self.route_destination['lon']:.6f}\n"
+                    f"Validation Time: {validation_time_text}\n"
+                )
+                QApplication.processEvents()
 
-                dialog_layout.addWidget(QLabel("\nSimulation duration (seconds):"))
-                duration_spin = QSpinBox()
-                duration_spin.setRange(300, 3600)
-                duration_spin.setValue(sim_duration)
-                duration_spin.setToolTip("Auto-calculated: 3x real travel time for data collection")
-                dialog_layout.addWidget(duration_spin)
+                from modules.data_collector import TrafficDataCollector
 
-                button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-                button_box.accepted.connect(dialog.accept)
-                button_box.rejected.connect(dialog.reject)
-                dialog_layout.addWidget(button_box)
+                collector = TrafficDataCollector(self.api_key)
 
-                if dialog.exec() != QDialog.DialogCode.Accepted:
+                try:
+                    # Determine departure time based on selection
+                    if validation_time_text == "Current time (real-time traffic)":
+                        # Use current time
+                        real_data = collector.fetch_route_traffic(
+                            origin_lat=self.route_origin['lat'],
+                            origin_lon=self.route_origin['lon'],
+                            dest_lat=self.route_destination['lat'],
+                            dest_lon=self.route_destination['lon'],
+                            route_id=None
+                        )
+                    else:
+                        # Use typical time from selection
+                        departure_time = self._parse_validation_time(validation_time_text)
+                        real_data = self._fetch_typical_traffic(
+                            collector,
+                            self.route_origin['lat'],
+                            self.route_origin['lon'],
+                            self.route_destination['lat'],
+                            self.route_destination['lon'],
+                            departure_time
+                        )
+
+                    if not real_data or 'speed_kmh' not in real_data:
+                        QMessageBox.warning(self, "API Error",
+                            "Could not fetch traffic data from Google Maps.\n"
+                            "Please check your API key and internet connection.")
+                        return
+
+                except Exception as e:
+                    QMessageBox.critical(self, "Error",
+                        f"Failed to fetch Google Maps data: {str(e)}\n\n"
+                        f"Please check your API key and internet connection.")
+                    import traceback
+                    traceback.print_exc()
                     return
 
-                num_vehicles = num_vehicles_spin.value()
-                sim_duration = duration_spin.value()
+            # Extract data (works for both historical and real-time)
+            real_world_speed = real_data['speed_kmh']
+            real_travel_time = real_data['travel_time_seconds']
+            real_distance = real_data['distance_meters'] / 1000.0  # Convert to km
 
-            except Exception as e:
-                QMessageBox.critical(self, "Error",
-                    f"Failed to fetch Google Maps data: {str(e)}\n\n"
-                    f"Please check your API key and internet connection.")
-                import traceback
-                traceback.print_exc()
+            # Step 2: Auto-calculate optimal simulation parameters based on real traffic
+            # Vehicle count based on congestion level
+            if real_world_speed < 25:
+                num_vehicles = 150  # Severe congestion
+                congestion_desc = "SEVERE CONGESTION (gridlock)"
+            elif real_world_speed < 35:
+                num_vehicles = 120  # Heavy congestion
+                congestion_desc = "HEAVY CONGESTION"
+            elif real_world_speed < 45:
+                num_vehicles = 80  # Moderate congestion (typical Cairo)
+                congestion_desc = "MODERATE CONGESTION"
+            elif real_world_speed < 55:
+                num_vehicles = 50  # Light congestion
+                congestion_desc = "LIGHT CONGESTION"
+            else:
+                num_vehicles = 30  # Free flow
+                congestion_desc = "FREE FLOW"
+
+            # Simulation duration: 3x real travel time to ensure enough data collection
+            # Minimum 10 minutes, maximum 30 minutes
+            sim_duration = max(600, min(1800, int(real_travel_time * 3)))
+
+            self.route_estimate_text.append(
+                f"\n✅ Traffic Data Retrieved:\n"
+                f"   Source: {'Historical Database' if use_historical else 'Google Maps API'}\n"
+                f"   Distance: {real_distance:.2f} km\n"
+                f"   Travel Time: {real_travel_time/60:.1f} minutes\n"
+                f"   Average Speed: {real_world_speed:.1f} km/h\n"
+                f"   Traffic Level: {congestion_desc}\n\n"
+                f"📊 Auto-Calculated Simulation Parameters:\n"
+                f"   Vehicles: {num_vehicles} (based on congestion)\n"
+                f"   Duration: {sim_duration}s ({sim_duration/60:.1f} min)\n"
+            )
+            QApplication.processEvents()
+
+            # Step 3: Show confirmation dialog with auto-calculated values (allow override)
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSpinBox, QDialogButtonBox
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Confirm Simulation Parameters")
+            dialog_layout = QVBoxLayout(dialog)
+
+            dialog_layout.addWidget(QLabel(
+                f"📊 Auto-calculated parameters based on real-world traffic:\n\n"
+                f"Real-world conditions:\n"
+                f"  • Speed: {real_world_speed:.1f} km/h ({congestion_desc})\n"
+                f"  • Travel time: {real_travel_time/60:.1f} minutes\n"
+                f"  • Distance: {real_distance:.2f} km\n\n"
+                f"You can adjust if needed:"
+            ))
+
+            dialog_layout.addWidget(QLabel("\nNumber of vehicles:"))
+            num_vehicles_spin = QSpinBox()
+            num_vehicles_spin.setRange(10, 200)
+            num_vehicles_spin.setValue(num_vehicles)
+            num_vehicles_spin.setToolTip(f"Auto-calculated from traffic level ({congestion_desc})")
+            dialog_layout.addWidget(num_vehicles_spin)
+
+            dialog_layout.addWidget(QLabel("\nSimulation duration (seconds):"))
+            duration_spin = QSpinBox()
+            duration_spin.setRange(300, 3600)
+            duration_spin.setValue(sim_duration)
+            duration_spin.setToolTip("Auto-calculated: 3x real travel time for data collection")
+            dialog_layout.addWidget(duration_spin)
+
+            button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            button_box.accepted.connect(dialog.accept)
+            button_box.rejected.connect(dialog.reject)
+            dialog_layout.addWidget(button_box)
+
+            if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
+
+            num_vehicles = num_vehicles_spin.value()
+            sim_duration = duration_spin.value()
 
             # Update UI
             self.route_estimate_text.append(
@@ -2881,6 +2988,148 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "Error", f"Targeted simulation failed: {e}")
             import traceback
             traceback.print_exc()
+
+    def _parse_validation_time(self, time_text: str):
+        """Parse validation time selection to datetime"""
+        from datetime import datetime, timedelta
+
+        # Map day names to weekday numbers
+        day_map = {
+            'Monday': 0, 'Tuesday': 1, 'Wednesday': 2, 'Thursday': 3,
+            'Friday': 4, 'Saturday': 5, 'Sunday': 6
+        }
+
+        # Extract day and time from text like "Monday 8:00 AM (typical)"
+        parts = time_text.split()
+        day_name = parts[0]
+        time_str = parts[1]  # e.g., "8:00"
+
+        # Parse hour
+        hour = int(time_str.split(':')[0])
+        if 'PM' in time_text and hour != 12:
+            hour += 12
+        elif 'AM' in time_text and hour == 12:
+            hour = 0
+
+        # Calculate next occurrence of this day/time
+        now = datetime.now()
+        target_weekday = day_map[day_name]
+        days_ahead = (target_weekday - now.weekday()) % 7
+        if days_ahead == 0:
+            days_ahead = 7  # Next week
+
+        target_date = now + timedelta(days=days_ahead)
+        target_date = target_date.replace(hour=hour, minute=0, second=0, microsecond=0)
+
+        return target_date
+
+    def _fetch_typical_traffic(self, collector, origin_lat, origin_lon, dest_lat, dest_lon, departure_time):
+        """Fetch typical traffic from Google Maps for a specific time"""
+        import requests
+        import time as time_module
+
+        origin = f"{origin_lat},{origin_lon}"
+        destination = f"{dest_lat},{dest_lon}"
+        departure_timestamp = int(departure_time.timestamp())
+
+        params = {
+            'origin': origin,
+            'destination': destination,
+            'mode': 'driving',
+            'departure_time': departure_timestamp,
+            'key': collector.api_key
+        }
+
+        # Rate limiting
+        time_module.sleep(1.0)
+
+        response = requests.get(
+            "https://maps.googleapis.com/maps/api/directions/json",
+            params=params,
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if data['status'] != 'OK':
+            raise Exception(f"API Error: {data['status']}")
+
+        route = data['routes'][0]['legs'][0]
+        distance_meters = route['distance']['value']
+
+        # Use duration_in_traffic for typical traffic
+        if 'duration_in_traffic' in route:
+            travel_time = route['duration_in_traffic']['value']
+        else:
+            travel_time = route['duration']['value']
+
+        speed_kmh = (distance_meters / 1000) / (travel_time / 3600) if travel_time > 0 else 0
+
+        return {
+            'travel_time_seconds': travel_time,
+            'distance_meters': distance_meters,
+            'speed_kmh': round(speed_kmh, 2),
+            'raw_response': data
+        }
+
+    def _get_historical_route_data(self, origin, destination, validation_time_text):
+        """Query database for historical data near this route"""
+        from datetime import datetime, timedelta
+        import math
+
+        # Parse the selected time to get day/hour filter
+        if validation_time_text == "Current time (real-time traffic)":
+            # Use current day/hour
+            now = datetime.now()
+            target_day = now.strftime('%A').lower()
+            target_hour = now.hour
+        else:
+            # Parse from selection like "Monday 8:00 AM (typical)"
+            parts = validation_time_text.split()
+            target_day = parts[0].lower()
+            time_str = parts[1]
+            hour = int(time_str.split(':')[0])
+            if 'PM' in validation_time_text and hour != 12:
+                hour += 12
+            elif 'AM' in validation_time_text and hour == 12:
+                hour = 0
+            target_hour = hour
+
+        # Get all traffic data from database
+        all_data = self.db.get_real_traffic_data()
+
+        if not all_data:
+            return None
+
+        # Filter data:
+        # 1. Find routes near our origin/destination
+        # 2. Filter by matching day/hour
+
+        matching_routes = []
+        for record in all_data:
+            # Check if timestamp matches target day/hour
+            timestamp = datetime.fromisoformat(record['timestamp'])
+            record_day = timestamp.strftime('%A').lower()
+            record_hour = timestamp.hour
+
+            # Match day and hour (within ±1 hour tolerance)
+            if record_day == target_day and abs(record_hour - target_hour) <= 1:
+                matching_routes.append(record)
+
+        if not matching_routes:
+            return None
+
+        # Calculate average from matching records
+        avg_speed = sum(r['speed_kmh'] for r in matching_routes if r['speed_kmh']) / len(matching_routes)
+        avg_time = sum(r['travel_time_seconds'] for r in matching_routes) / len(matching_routes)
+        avg_distance = sum(r['distance_meters'] for r in matching_routes) / len(matching_routes)
+
+        return {
+            'speed_kmh': round(avg_speed, 2),
+            'travel_time_seconds': int(avg_time),
+            'distance_meters': int(avg_distance),
+            'sample_count': len(matching_routes)
+        }
 
     def estimate_route_time(self):
         """Estimate travel time between two points using simulation data"""

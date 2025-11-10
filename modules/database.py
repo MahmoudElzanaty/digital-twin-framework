@@ -353,16 +353,26 @@ class DigitalTwinDatabase:
         traffic_delay_seconds: int = None,
         speed_kmh: float = None,
         data_source: str = "google_maps",
-        raw_data: Dict = None
+        raw_data: Dict = None,
+        timestamp: datetime = None
     ):
-        """Store real-world traffic measurement"""
+        """Store real-world traffic measurement with optional custom timestamp"""
         cursor = self.conn.cursor()
+
+        # Use provided timestamp or current time
+        if timestamp is None:
+            timestamp_str = datetime.now().isoformat()
+        elif isinstance(timestamp, datetime):
+            timestamp_str = timestamp.isoformat()
+        else:
+            timestamp_str = timestamp  # Already a string
+
         cursor.execute("""
             INSERT INTO real_traffic_data
             (route_id, timestamp, travel_time_seconds, distance_meters,
              traffic_delay_seconds, speed_kmh, data_source, raw_data)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (route_id, datetime.now().isoformat(), travel_time_seconds,
+        """, (route_id, timestamp_str, travel_time_seconds,
               distance_meters, traffic_delay_seconds, speed_kmh, data_source,
               json.dumps(raw_data) if raw_data else None))
         self.conn.commit()

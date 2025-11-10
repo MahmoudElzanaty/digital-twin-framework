@@ -15,7 +15,11 @@
       "Bash(dir:*)",
       "Bash(del:*)",
       "Bash(tree:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(Get-ChildItem \"C:\\Users\\mondy\\OneDrive\\Desktop\\Bachelors\\digital_twin_framework\" -Recurse)",
+      "Bash(Where-Object {$_xtension -eq \".db\"})",
+      "Bash(Select-Object FullName)",
+      "Bash(rm:*)"
     ],
     "deny": [],
     "ask": []

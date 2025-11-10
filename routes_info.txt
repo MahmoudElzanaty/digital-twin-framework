@@ -1,0 +1,28 @@
+Total routes: 51
+
+Sample routes:
+1. ID: cairo_tahrir_citystars
+   Name: Tahrir Square → City Stars
+   Origin: (30.0444, 31.2357)
+   Dest: (30.0727, 31.3497)
+
+2. ID: cairo_maadi_zamalek
+   Name: Maadi → Zamalek
+   Origin: (29.9602, 31.2569)
+   Dest: (30.0618, 31.2197)
+
+3. ID: cairo_airport_tahrir
+   Name: Cairo Airport → Tahrir Square
+   Origin: (30.1219, 31.4056)
+   Dest: (30.0444, 31.2357)
+
+4. ID: cairo_giza_downtown
+   Name: Giza Pyramids → Downtown Cairo
+   Origin: (29.9792, 31.1342)
+   Dest: (30.0444, 31.2357)
+
+5. ID: cairo_ring_road_segment
+   Name: Ring Road: Nasr City → 6th October
+   Origin: (30.0444, 31.3369)
+   Dest: (30.0131, 31.2089)
+

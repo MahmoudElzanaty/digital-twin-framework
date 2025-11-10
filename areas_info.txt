@@ -1,0 +1,135 @@
+Area 1:
+{
+  "area_id": "area_20251021_114911",
+  "name": "tagamo3",
+  "bbox_north": 30.08276049461794,
+  "bbox_south": 29.937085278663123,
+  "bbox_east": 31.575846398379724,
+  "bbox_west": 31.403536902752993,
+  "sumo_network_file": null,
+  "status": "training",
+  "training_start_date": "2025-10-21T11:49:23.024024",
+  "training_end_date": null,
+  "training_duration_days": 0.006944444444444444,
+  "collections_completed": 3,
+  "collections_target": 10,
+  "accuracy_rmse": null,
+  "accuracy_mae": null,
+  "accuracy_mape": null,
+  "created_at": "2025-10-21T11:49:11.416908",
+  "bbox": {
+    "north": 30.08276049461794,
+    "south": 29.937085278663123,
+    "east": 31.575846398379724,
+    "west": 31.403536902752993
+  }
+}
+
+Area 2:
+{
+  "area_id": "area_20251021_114245",
+  "name": "nasr city",
+  "bbox_north": 30.056317022770106,
+  "bbox_south": 30.02748856469436,
+  "bbox_east": 31.378301319850724,
+  "bbox_west": 31.356676821395556,
+  "sumo_network_file": null,
+  "status": "training",
+  "training_start_date": "2025-10-21T11:57:40.148791",
+  "training_end_date": null,
+  "training_duration_days": 0.001388888888888889,
+  "collections_completed": 2,
+  "collections_target": 2,
+  "accuracy_rmse": null,
+  "accuracy_mae": null,
+  "accuracy_mape": null,
+  "created_at": "2025-10-21T11:42:45.767205",
+  "bbox": {
+    "north": 30.056317022770106,
+    "south": 30.02748856469436,
+    "east": 31.378301319850724,
+    "west": 31.356676821395556
+  }
+}
+
+Area 3:
+{
+  "area_id": "area_20251020_222834",
+  "name": "Cairo Downtown Test",
+  "bbox_north": 30.1,
+  "bbox_south": 30.0,
+  "bbox_east": 31.3,
+  "bbox_west": 31.2,
+  "sumo_network_file": null,
+  "status": "created",
+  "training_start_date": null,
+  "training_end_date": null,
+  "training_duration_days": null,
+  "collections_completed": 0,
+  "collections_target": null,
+  "accuracy_rmse": null,
+  "accuracy_mae": null,
+  "accuracy_mape": null,
+  "created_at": "2025-10-20T22:28:34.466811",
+  "bbox": {
+    "north": 30.1,
+    "south": 30.0,
+    "east": 31.3,
+    "west": 31.2
+  }
+}
+
+Area 4:
+{
+  "area_id": "area_20251020_222802",
+  "name": "Test Area",
+  "bbox_north": 30.1,
+  "bbox_south": 30.0,
+  "bbox_east": 31.3,
+  "bbox_west": 31.2,
+  "sumo_network_file": null,
+  "status": "created",
+  "training_start_date": null,
+  "training_end_date": null,
+  "training_duration_days": null,
+  "collections_completed": 0,
+  "collections_target": null,
+  "accuracy_rmse": null,
+  "accuracy_mae": null,
+  "accuracy_mape": null,
+  "created_at": "2025-10-20T22:28:02.475359",
+  "bbox": {
+    "north": 30.1,
+    "south": 30.0,
+    "east": 31.3,
+    "west": 31.2
+  }
+}
+
+Area 5:
+{
+  "area_id": "test_area_001",
+  "name": "Test Downtown Cairo",
+  "bbox_north": 30.1,
+  "bbox_south": 30.0,
+  "bbox_east": 31.3,
+  "bbox_west": 31.2,
+  "sumo_network_file": "test_network.net.xml",
+  "status": "created",
+  "training_start_date": null,
+  "training_end_date": null,
+  "training_duration_days": null,
+  "collections_completed": 0,
+  "collections_target": null,
+  "accuracy_rmse": null,
+  "accuracy_mae": null,
+  "accuracy_mape": null,
+  "created_at": "2025-10-20T22:25:20.166318",
+  "bbox": {
+    "north": 30.1,
+    "south": 30.0,
+    "east": 31.3,
+    "west": 31.2
+  }
+}
+
