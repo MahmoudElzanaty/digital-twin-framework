@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from typing import Dict, List, Tuple, Optional
 from modules.database import get_db
+from modules.advanced_visualizer import AdvancedVisualizer
+from modules.results_logger import get_results_logger
 
 
 class RouteEstimator:
@@ -25,6 +27,8 @@ class RouteEstimator:
         self.scenario_id = scenario_id
         self.edge_speeds = {}  # edge_id -> average speed in m/s
         self.db = get_db()
+        self.visualizer = AdvancedVisualizer()
+        self.logger = get_results_logger()
 
         # Load simulation edge data
         self._load_simulation_data()
@@ -337,10 +341,25 @@ class RouteEstimator:
                 pass
 
             # Calculate travel time using simulation data
-            return self._estimate_travel_time(edges, from_lat, from_lon, to_lat, to_lon)
+            result = self._estimate_travel_time(edges, from_lat, from_lon, to_lat, to_lon)
+
+            # Log the estimation
+            if result and result.get('success'):
+                self.logger.log_route_estimation(result)
+
+                # Generate visualization
+                try:
+                    viz_path = self.visualizer.plot_route_estimation(result)
+                    result['visualization_path'] = viz_path
+                    print(f"[ROUTE_ESTIMATOR] ✅ Visualization saved: {viz_path}")
+                except Exception as viz_error:
+                    print(f"[ROUTE_ESTIMATOR] ⚠️ Could not generate visualization: {viz_error}")
+
+            return result
 
         except Exception as e:
             print(f"[ROUTE_ESTIMATOR] Error finding route: {e}")
+            self.logger.log_error("Route estimation", e)
             import traceback
             traceback.print_exc()
             return None
@@ -485,10 +504,22 @@ class RouteEstimator:
                 'distance_error_meters': abs(sim_result['distance_meters'] - real_data['distance_meters'])
             }
 
+            # Log the comparison
+            self.logger.log_route_estimation(sim_result)
+
+            # Generate comparison visualization
+            try:
+                viz_path = self.visualizer.plot_route_estimation(sim_result)
+                sim_result['visualization_path'] = viz_path
+                print(f"[ROUTE_ESTIMATOR] ✅ Comparison visualization saved: {viz_path}")
+            except Exception as viz_error:
+                print(f"[ROUTE_ESTIMATOR] ⚠️ Could not generate visualization: {viz_error}")
+
             return sim_result
 
         except Exception as e:
             print(f"[ROUTE_ESTIMATOR] Error comparing with Google Maps: {e}")
+            self.logger.log_error("Google Maps comparison", e)
             import traceback
             traceback.print_exc()
             return sim_result

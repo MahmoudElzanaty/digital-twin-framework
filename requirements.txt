@@ -22,6 +22,7 @@ tensorflow==2.15.0
 matplotlib==3.8.2
 seaborn==0.13.1
 plotly==5.18.0
+scipy>=1.11.0  # For statistical analysis in visualizations
 
 # Database for persistence
 sqlalchemy==2.0.25

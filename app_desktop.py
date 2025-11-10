@@ -1407,11 +1407,19 @@ class MainWindow(QWidget):
         self.view_scenario_btn = QPushButton("👁️ View Details")
         self.view_scenario_btn.clicked.connect(self.view_scenario_details)
         btn_layout.addWidget(self.view_scenario_btn)
-        
+
+        self.visualize_btn = QPushButton("📊 Generate Visualization")
+        self.visualize_btn.clicked.connect(self.generate_visualization_for_selected)
+        btn_layout.addWidget(self.visualize_btn)
+
         self.export_results_btn = QPushButton("💾 Export Results")
         self.export_results_btn.clicked.connect(self.export_results)
         btn_layout.addWidget(self.export_results_btn)
-        
+
+        self.generate_report_btn = QPushButton("📝 Generate Summary Report")
+        self.generate_report_btn.clicked.connect(self.generate_summary_report)
+        btn_layout.addWidget(self.generate_report_btn)
+
         btn_layout.addStretch()
         scenarios_layout.addLayout(btn_layout)
         
@@ -2635,25 +2643,142 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "Error", f"Prediction failed: {str(e)}")
 
     def view_scenario_details(self):
-        """View scenario details"""
+        """View scenario details with visualization"""
         row = self.scenarios_table.currentRow()
         if row >= 0:
             scenario_id = self.scenarios_table.item(row, 0).text()
-            
+
             try:
                 comparison = AreaBasedComparison(self.db)
                 results = comparison.compare_area_metrics(scenario_id, "data/logs/edge_state.csv")
-                
+
                 if results:
                     text = f"Scenario: {scenario_id}\n\n"
                     text += f"Speed Error: {results['comparison']['speed_error_pct']:.2f}%\n"
                     text += f"Congestion Similarity: {results['comparison']['congestion_similarity']:.1f}%\n\n"
                     text += f"Real avg speed: {results['real_world']['avg_speed_kmh']:.2f} km/h\n"
                     text += f"Sim avg speed: {results['simulation']['avg_speed_kmh']:.2f} km/h\n"
-                    
+
                     self.comparison_text.setText(text)
+
+                    # Check if visualization exists and offer to open it
+                    viz_path = f"data/visualizations/{scenario_id}_overview.png"
+                    if os.path.exists(viz_path):
+                        text += f"\n\n📊 Visualization available: {viz_path}\n"
+                        self.comparison_text.setText(text)
+
+                        # Ask if user wants to open visualization
+                        reply = QMessageBox.question(
+                            self, "Visualization Available",
+                            f"A visualization is available for this scenario.\n\nWould you like to view it?",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                        )
+
+                        if reply == QMessageBox.StandardButton.Yes:
+                            self.open_visualization(viz_path)
+                    else:
+                        # Offer to generate visualization
+                        reply = QMessageBox.question(
+                            self, "Generate Visualization",
+                            f"No visualization found for this scenario.\n\nWould you like to generate one now?",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                        )
+
+                        if reply == QMessageBox.StandardButton.Yes:
+                            self.generate_visualization(scenario_id)
+
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Could not load scenario: {str(e)}")
+
+    def open_visualization(self, viz_path: str):
+        """Open visualization in system default viewer"""
+        try:
+            import subprocess
+            import platform
+
+            system = platform.system()
+            if system == 'Windows':
+                os.startfile(viz_path)
+            elif system == 'Darwin':  # macOS
+                subprocess.run(['open', viz_path])
+            else:  # Linux
+                subprocess.run(['xdg-open', viz_path])
+
+            self.log(f"Opened visualization: {viz_path}", "SUCCESS")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not open visualization: {str(e)}")
+
+    def generate_visualization(self, scenario_id: str):
+        """Generate visualization for a scenario"""
+        try:
+            from modules.advanced_visualizer import AdvancedVisualizer
+
+            self.log(f"Generating visualization for {scenario_id}...", "INFO")
+            QApplication.processEvents()
+
+            visualizer = AdvancedVisualizer()
+            viz_path = visualizer.plot_simulation_overview(scenario_id)
+
+            self.log(f"✅ Visualization generated: {viz_path}", "SUCCESS")
+
+            # Ask if user wants to open it
+            reply = QMessageBox.question(
+                self, "Visualization Generated",
+                f"Visualization generated successfully!\n\nWould you like to view it now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self.open_visualization(viz_path)
+
+        except Exception as e:
+            self.log(f"❌ Visualization generation failed: {str(e)}", "ERROR")
+            QMessageBox.warning(self, "Error", f"Could not generate visualization: {str(e)}")
+
+    def generate_visualization_for_selected(self):
+        """Generate visualization for selected scenario"""
+        row = self.scenarios_table.currentRow()
+        if row >= 0:
+            scenario_id = self.scenarios_table.item(row, 0).text()
+            self.generate_visualization(scenario_id)
+        else:
+            QMessageBox.warning(self, "No Selection", "Please select a scenario from the table first.")
+
+    def generate_summary_report(self):
+        """Generate summary report for all scenarios"""
+        try:
+            from modules.results_logger import get_results_logger
+
+            # Get all scenario IDs
+            cursor = self.db.conn.cursor()
+            cursor.execute("SELECT DISTINCT scenario_id FROM area_comparisons ORDER BY timestamp DESC LIMIT 10")
+            scenarios = [row[0] for row in cursor.fetchall()]
+
+            if not scenarios:
+                QMessageBox.information(self, "No Data", "No scenarios found to generate report.")
+                return
+
+            self.log(f"Generating summary report for {len(scenarios)} scenarios...", "INFO")
+            QApplication.processEvents()
+
+            logger = get_results_logger()
+            report_path = logger.generate_summary_report(scenarios)
+
+            self.log(f"✅ Summary report generated: {report_path}", "SUCCESS")
+
+            # Ask if user wants to open it
+            reply = QMessageBox.question(
+                self, "Report Generated",
+                f"Summary report generated successfully!\n\nWould you like to view it now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self.open_visualization(report_path)
+
+        except Exception as e:
+            self.log(f"❌ Report generation failed: {str(e)}", "ERROR")
+            QMessageBox.warning(self, "Error", f"Could not generate report: {str(e)}")
 
     def export_results(self):
         """Export results to file"""

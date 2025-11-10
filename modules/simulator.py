@@ -9,6 +9,8 @@ from modules.logger import TrafficLogger
 from modules.dynamic_calibrator import DynamicCalibrator
 from modules.database import get_db
 from modules.area_comparison import AreaBasedComparison
+from modules.advanced_visualizer import AdvancedVisualizer
+from modules.results_logger import get_results_logger
 
 def create_config(net_file, route_file, cfg_path, sim_time=3600):
     """Create SUMO configuration file with anti-deadlock settings"""
@@ -73,7 +75,17 @@ def run_simulation(
     # Generate scenario ID if not provided
     if scenario_id is None:
         scenario_id = f"sim_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
+
+    # Initialize advanced logging
+    results_logger = get_results_logger()
+    results_logger.log_simulation_start(scenario_id, {
+        'config_file': cfg_file,
+        'gui': gui,
+        'digital_twin': enable_digital_twin,
+        'dynamic_calibration': enable_dynamic_calibration,
+        'initial_params': initial_params if initial_params else 'None'
+    })
+
     print("\n" + "="*70)
     print(f"STARTING SIMULATION: {scenario_id}")
     print("="*70)
@@ -129,62 +141,93 @@ def run_simulation(
             if step % 100 == 0:
                 status = f"Step {step}"
 
+                # Collect metrics for logging
+                metrics = {}
                 if dynamic_calib and dynamic_calib.last_sim_speed:
                     status += f" | Sim speed: {dynamic_calib.last_sim_speed:.1f} km/h"
+                    metrics['avg_speed'] = dynamic_calib.last_sim_speed / 3.6  # Convert to m/s
+
+                # Count vehicles
+                vehicle_count = len(traci.vehicle.getIDList())
+                metrics['vehicle_count'] = vehicle_count
+                status += f" | Vehicles: {vehicle_count}"
 
                 print(f"[SIMULATOR] {status}")
+
+                # Log progress
+                if metrics:
+                    results_logger.log_simulation_progress(scenario_id, step, metrics)
                 
     finally:
         print("\n[SIMULATOR] Simulation ending, finalizing results...")
-        
+
         # Save standard logs
         logger.close()
+
+        # Collect final results
+        final_results = {}
 
         # DYNAMIC CALIBRATION RESULTS
         if dynamic_calib:
             try:
                 # Print calibration report
                 dynamic_calib.print_report()
-                
+
                 # Save to database
                 dynamic_calib.save_to_database(scenario_id)
-                
+
+                # Store calibration results
+                final_results['calibration'] = {
+                    'initial_speed': dynamic_calib.initial_speed if hasattr(dynamic_calib, 'initial_speed') else 0,
+                    'final_speed': dynamic_calib.last_sim_speed / 3.6 if dynamic_calib.last_sim_speed else 0,
+                    'num_updates': len(dynamic_calib.history) if hasattr(dynamic_calib, 'history') else 0
+                }
+
             except Exception as e:
                 print(f"[SIMULATOR] ⚠️ Error in dynamic calibration results: {e}")
-        
+                results_logger.log_error("Dynamic calibration finalization", e)
+
         # AREA-BASED COMPARISON (Works even without route matching!)
         print("\n" + "="*70)
         print("DIGITAL TWIN: Area-based comparison with real-world data")
         print("="*70)
-        
+
+        comparison_results = None
         try:
             area_comp = AreaBasedComparison()
-            results = area_comp.compare_area_metrics(
+            comparison_results = area_comp.compare_area_metrics(
                 scenario_id=scenario_id,
                 log_file="data/logs/edge_state.csv"
             )
-            
-            if results:
+
+            if comparison_results:
                 print(f"\n💾 Digital twin comparison completed")
                 print(f"📊 Scenario ID: {scenario_id}")
-                print(f"📈 Speed accuracy: {results['comparison']['speed_error_pct']:.1f}% error")
-                print(f"📈 Congestion similarity: {results['comparison']['congestion_similarity']:.1f}%")
-                
+                print(f"📈 Speed accuracy: {comparison_results['comparison']['speed_error_pct']:.1f}% error")
+                print(f"📈 Congestion similarity: {comparison_results['comparison']['congestion_similarity']:.1f}%")
+
                 # Export detailed report
                 area_comp.export_comparison_report(scenario_id, f"data/reports/report_{scenario_id}.txt")
-                
+
+                # Store comparison results
+                final_results['comparison'] = comparison_results['comparison']
+
+                # Log comparison
+                results_logger.log_comparison(comparison_results)
+
         except Exception as e:
             print(f"[SIMULATOR] ⚠️ Could not perform area comparison")
             print(f"[SIMULATOR]    Error: {e}")
             print(f"[SIMULATOR]    Note: Collect real data using: python setup_digital_twin.py")
-        
+            results_logger.log_error("Area-based comparison", e)
+
         # Close TraCI
         traci.close()
-        
+
         print("\n" + "="*70)
         print(f"✅ SIMULATION COMPLETE: {scenario_id}")
         print("="*70)
-        
+
         # Summary
         print(f"\nResults saved:")
         print(f"  - Traffic logs: data/logs/edge_state.csv")
@@ -192,11 +235,25 @@ def run_simulation(
             print(f"  - Dynamic calibration: Database")
         print(f"  - Comparison report: data/reports/report_{scenario_id}.txt")
 
+        # Log completion
+        results_logger.log_simulation_complete(scenario_id, final_results)
+
+        # Generate visualizations
+        print("\n[SIMULATOR] Generating visualizations...")
+        try:
+            visualizer = AdvancedVisualizer()
+            viz_path = visualizer.plot_simulation_overview(scenario_id)
+            print(f"[SIMULATOR] ✅ Visualization saved: {viz_path}")
+        except Exception as e:
+            print(f"[SIMULATOR] ⚠️ Could not generate visualization: {e}")
+            results_logger.log_error("Visualization generation", e)
+
         print(f"\nNext steps:")
         print(f"  1. Analyze results in GUI: Results & Analysis tab")
         print(f"  2. View calibration improvements")
         print(f"  3. Compare with real-world data")
-        
+        print(f"  4. Check visualizations in: data/visualizations/")
+
         return scenario_id
 
 
