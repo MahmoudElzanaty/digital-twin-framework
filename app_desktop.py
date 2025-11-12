@@ -1046,13 +1046,62 @@ class MainWindow(QWidget):
         api_status_layout = QHBoxLayout()
         self.api_status_label = QLabel("API Key: " + ("✅ Configured" if self.api_key else "❌ Not configured"))
         api_status_layout.addWidget(self.api_status_label)
-        
+
         self.config_api_btn = QPushButton("⚙️ Configure API Key")
         self.config_api_btn.clicked.connect(self.configure_api_key)
         api_status_layout.addWidget(self.config_api_btn)
         api_status_layout.addStretch()
         collection_layout.addLayout(api_status_layout)
-        
+
+        # Network selector section
+        network_selector_group = QGroupBox("🗺️ Select Network for Data Collection")
+        network_selector_layout = QVBoxLayout(network_selector_group)
+
+        network_select_layout = QHBoxLayout()
+        network_select_layout.addWidget(QLabel("Network:"))
+
+        self.network_selector_combo = QComboBox()
+        self.network_selector_combo.setMinimumWidth(300)
+        self.network_selector_combo.currentIndexChanged.connect(self.on_network_selected)
+        network_select_layout.addWidget(self.network_selector_combo)
+
+        refresh_networks_btn = QPushButton("🔄 Refresh Networks")
+        refresh_networks_btn.clicked.connect(self.load_cached_networks)
+        network_select_layout.addWidget(refresh_networks_btn)
+
+        network_select_layout.addStretch()
+        network_selector_layout.addLayout(network_select_layout)
+
+        # Network info display
+        self.network_info_label = QLabel("No network selected")
+        self.network_info_label.setStyleSheet("padding: 10px; background: #E3F2FD; border-radius: 5px;")
+        self.network_info_label.setWordWrap(True)
+        network_selector_layout.addWidget(self.network_info_label)
+
+        # Number of sample routes
+        sample_routes_layout = QHBoxLayout()
+        sample_routes_layout.addWidget(QLabel("Sample Routes to Generate:"))
+        self.num_sample_routes_spin = QSpinBox()
+        self.num_sample_routes_spin.setRange(5, 100)
+        self.num_sample_routes_spin.setValue(20)
+        self.num_sample_routes_spin.setToolTip("Number of random routes to generate within the network for data collection")
+        sample_routes_layout.addWidget(self.num_sample_routes_spin)
+        sample_routes_layout.addStretch()
+        network_selector_layout.addLayout(sample_routes_layout)
+
+        # Collection button for selected network
+        collect_network_btn = QPushButton("📡 Collect Data for Selected Network")
+        collect_network_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 10px; font-weight: bold;")
+        collect_network_btn.clicked.connect(self.collect_data_for_network)
+        network_selector_layout.addWidget(collect_network_btn)
+
+        collection_layout.addWidget(network_selector_group)
+
+        # Load cached networks on startup
+        self.selected_network_file = None
+        self.selected_network_bbox = None
+        self.load_cached_networks()
+
         # Collection controls
         controls_layout = QHBoxLayout()
         
@@ -2533,6 +2582,246 @@ class MainWindow(QWidget):
             print(f"Error refreshing scenarios: {e}")
 
     # ============== EVENT HANDLERS FOR NEW TABS ==============
+
+    def load_cached_networks(self):
+        """Load all cached network files"""
+        import glob
+
+        self.network_selector_combo.clear()
+        self.network_selector_combo.addItem("-- Select a Network --", None)
+
+        # Find all .net.xml files in data/networks
+        network_dir = "data/networks"
+        if not os.path.exists(network_dir):
+            self.log("No networks directory found", "WARNING")
+            return
+
+        network_files = glob.glob(os.path.join(network_dir, "**/*.net.xml"), recursive=True)
+
+        for net_file in sorted(network_files):
+            # Get relative path and friendly name
+            rel_path = os.path.relpath(net_file, network_dir)
+            friendly_name = os.path.splitext(os.path.basename(net_file))[0]
+
+            # Add to combo box
+            self.network_selector_combo.addItem(friendly_name, net_file)
+
+        self.log(f"Loaded {len(network_files)} cached networks", "INFO")
+
+    def on_network_selected(self, index):
+        """Handle network selection"""
+        if index <= 0:  # First item is placeholder
+            self.selected_network_file = None
+            self.selected_network_bbox = None
+            self.network_info_label.setText("No network selected")
+            return
+
+        network_file = self.network_selector_combo.itemData(index)
+        if not network_file or not os.path.exists(network_file):
+            self.network_info_label.setText("❌ Network file not found")
+            return
+
+        self.selected_network_file = network_file
+
+        try:
+            # Extract bounding box from network
+            import xml.etree.ElementTree as ET
+            tree = ET.parse(network_file)
+            root = tree.getroot()
+
+            location = root.find('location')
+            if location is not None:
+                # Get network boundary
+                conv_boundary = location.get('convBoundary')
+                if conv_boundary:
+                    # Parse boundary (format: "x1,y1,x2,y2")
+                    bounds = [float(x) for x in conv_boundary.split(',')]
+
+                    # Get projection info to convert to lat/lon
+                    proj_param = location.get('projParameter', '')
+                    net_offset_str = location.get('netOffset', '0.0,0.0')
+
+                    if 'proj=utm' in proj_param or 'proj=merc' in proj_param:
+                        # Need to convert from projected coordinates to lat/lon
+                        try:
+                            from pyproj import Transformer
+                            offset_x, offset_y = map(float, net_offset_str.split(','))
+
+                            # Create transformer from network projection to WGS84
+                            transformer = Transformer.from_crs(proj_param, "EPSG:4326", always_xy=True)
+
+                            # Convert bounds
+                            x1, y1, x2, y2 = bounds
+                            lon1, lat1 = transformer.transform(x1 - offset_x, y1 - offset_y)
+                            lon2, lat2 = transformer.transform(x2 - offset_x, y2 - offset_y)
+
+                            self.selected_network_bbox = {
+                                'north': max(lat1, lat2),
+                                'south': min(lat1, lat2),
+                                'east': max(lon1, lon2),
+                                'west': min(lon1, lon2)
+                            }
+
+                        except ImportError:
+                            self.network_info_label.setText("❌ pyproj not installed - cannot extract coordinates")
+                            return
+                        except Exception as e:
+                            self.network_info_label.setText(f"❌ Error converting coordinates: {str(e)}")
+                            return
+                    else:
+                        # Assuming lat/lon directly
+                        x1, y1, x2, y2 = bounds
+                        self.selected_network_bbox = {
+                            'north': max(y1, y2),
+                            'south': min(y1, y2),
+                            'east': max(x1, x2),
+                            'west': min(x1, x2)
+                        }
+
+                    # Display info
+                    bbox = self.selected_network_bbox
+                    info = f"✅ Network loaded successfully!\n\n"
+                    info += f"📍 Bounding Box:\n"
+                    info += f"  North: {bbox['north']:.6f}°\n"
+                    info += f"  South: {bbox['south']:.6f}°\n"
+                    info += f"  East: {bbox['east']:.6f}°\n"
+                    info += f"  West: {bbox['west']:.6f}°\n\n"
+                    info += f"📁 File: {os.path.basename(network_file)}"
+
+                    self.network_info_label.setText(info)
+                    self.log(f"Selected network: {os.path.basename(network_file)}", "SUCCESS")
+
+                else:
+                    self.network_info_label.setText("❌ No boundary information in network")
+            else:
+                self.network_info_label.setText("❌ No location information in network")
+
+        except Exception as e:
+            self.network_info_label.setText(f"❌ Error loading network: {str(e)}")
+            self.log(f"Error loading network: {str(e)}", "ERROR")
+
+    def collect_data_for_network(self):
+        """Collect real-world traffic data for selected network"""
+        if not self.api_key:
+            QMessageBox.warning(self, "No API Key",
+                "Please configure your Google Maps API key first!")
+            return
+
+        if not self.selected_network_file or not self.selected_network_bbox:
+            QMessageBox.warning(self, "No Network Selected",
+                "Please select a network from the dropdown first!")
+            return
+
+        try:
+            from modules.simple_route_generator import SimpleRouteGenerator
+            from modules.data_collector import TrafficDataCollector
+
+            bbox = self.selected_network_bbox
+            num_routes = self.num_sample_routes_spin.value()
+
+            # Confirm with user
+            reply = QMessageBox.question(
+                self, "Collect Data",
+                f"Collect real-world traffic data for this network?\n\n"
+                f"Network: {os.path.basename(self.selected_network_file)}\n"
+                f"Sample Routes: {num_routes}\n"
+                f"Bounding Box: {bbox['north']:.4f}°N, {bbox['south']:.4f}°S, "
+                f"{bbox['east']:.4f}°E, {bbox['west']:.4f}°W\n\n"
+                f"This will make {num_routes} API calls to Google Maps.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+            self.log("="*60, "INFO")
+            self.log(f"📡 Collecting data for network: {os.path.basename(self.selected_network_file)}", "INFO")
+            self.log("="*60, "INFO")
+
+            # Generate sample routes within the network bounds
+            route_gen = SimpleRouteGenerator(self.selected_network_file)
+            sample_routes = route_gen.generate_random_routes(
+                num_routes,
+                bbox['south'],
+                bbox['north'],
+                bbox['west'],
+                bbox['east']
+            )
+
+            self.log(f"Generated {len(sample_routes)} sample routes", "INFO")
+
+            # Collect data for each route
+            collector = TrafficDataCollector(self.api_key)
+            collected = 0
+            failed = 0
+
+            for i, route in enumerate(sample_routes, 1):
+                self.log(f"Collecting route {i}/{len(sample_routes)}: {route['name']}", "INFO")
+                QApplication.processEvents()
+
+                try:
+                    data = collector.fetch_route_traffic(
+                        origin_lat=route['origin_lat'],
+                        origin_lon=route['origin_lon'],
+                        dest_lat=route['dest_lat'],
+                        dest_lon=route['dest_lon'],
+                        route_id=None  # Don't store as probe route
+                    )
+
+                    if data:
+                        # Store in database
+                        self.db.conn.execute("""
+                            INSERT INTO real_traffic_data
+                            (timestamp, travel_time_seconds, distance_meters,
+                             traffic_delay_seconds, speed_kmh, data_source,
+                             origin_lat, origin_lon, dest_lat, dest_lon)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            data['timestamp'],
+                            data['travel_time_seconds'],
+                            data['distance_meters'],
+                            data['traffic_delay_seconds'],
+                            data['speed_kmh'],
+                            'google_maps',
+                            route['origin_lat'],
+                            route['origin_lon'],
+                            route['dest_lat'],
+                            route['dest_lon']
+                        ))
+                        self.db.conn.commit()
+
+                        collected += 1
+                        self.log(f"  ✓ Speed: {data['speed_kmh']:.1f} km/h, Time: {data['travel_time_seconds']}s", "SUCCESS")
+                    else:
+                        failed += 1
+                        self.log(f"  ✗ Failed to collect data", "WARNING")
+
+                except Exception as e:
+                    failed += 1
+                    self.log(f"  ✗ Error: {str(e)}", "ERROR")
+
+            self.log("="*60, "INFO")
+            self.log(f"✅ Collection complete!", "SUCCESS")
+            self.log(f"   Collected: {collected}/{len(sample_routes)}", "INFO")
+            self.log(f"   Failed: {failed}/{len(sample_routes)}", "INFO" if failed == 0 else "WARNING")
+            self.log("="*60, "INFO")
+
+            # Refresh dashboard
+            self.refresh_dashboard()
+
+            QMessageBox.information(
+                self, "Collection Complete",
+                f"Data collection completed!\n\n"
+                f"Successful: {collected}\n"
+                f"Failed: {failed}\n\n"
+                f"Data has been stored in the database."
+            )
+
+        except Exception as e:
+            self.log(f"❌ Collection failed: {str(e)}", "ERROR")
+            QMessageBox.critical(self, "Error", f"Data collection failed:\n\n{str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def configure_api_key(self):
         """Configure Google Maps API key"""
