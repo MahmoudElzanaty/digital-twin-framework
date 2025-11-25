@@ -195,6 +195,366 @@ class AreaTrainingWorker(QThread):
         """Stop the collection"""
         self.running = False
 
+class TypicalTrafficCollectionWorker(QThread):
+    """Background thread for typical traffic pattern collection"""
+    progress = pyqtSignal(str)
+    status_update = pyqtSignal(int, int, int)  # (collected, failed, total)
+    finished = pyqtSignal(dict)  # Summary dict
+
+    def __init__(self, api_key, collection_mode='full_week', days=7, samples_per_day=8,
+                 network_file=None, network_bbox=None, num_routes=20):
+        super().__init__()
+        self.api_key = api_key
+        self.collection_mode = collection_mode  # 'full_week', 'peak_hours', 'custom'
+        self.days = days
+        self.samples_per_day = samples_per_day
+        self.network_file = network_file
+        self.network_bbox = network_bbox
+        self.num_routes = num_routes
+        self.running = True
+
+    def run(self):
+        import time
+        import requests
+        from datetime import datetime, timedelta
+        from modules.simple_route_generator import SimpleRouteGenerator
+
+        try:
+            # Generate random sample routes within the network
+            if not self.network_file or not self.network_bbox:
+                self.progress.emit("❌ No network selected!")
+                self.finished.emit({'success': False, 'collected': 0, 'failed': 0})
+                return
+
+            self.progress.emit(f"🗺️ Generating {self.num_routes} random routes in network...")
+            route_gen = SimpleRouteGenerator(self.network_file)
+            bbox = self.network_bbox
+            routes = route_gen.generate_random_routes(
+                self.num_routes,
+                bbox['south'],
+                bbox['north'],
+                bbox['west'],
+                bbox['east']
+            )
+
+            if not routes:
+                self.progress.emit("❌ Failed to generate routes!")
+                self.finished.emit({'success': False, 'collected': 0, 'failed': 0})
+                return
+
+            self.progress.emit(f"✅ Generated {len(routes)} sample routes")
+
+            total_collected = 0
+            total_failed = 0
+            db = get_db()
+
+            # Determine sample times based on mode
+            if self.collection_mode == 'peak_hours':
+                self.progress.emit("📊 Collecting typical peak hour traffic...")
+                # Monday & Saturday, morning & evening
+                now = datetime.now()
+                days_until_monday = (7 - now.weekday()) % 7 or 7
+                monday = (now + timedelta(days=days_until_monday)).replace(hour=8, minute=0, second=0, microsecond=0)
+                days_until_saturday = (5 - now.weekday()) % 7 or 7
+                saturday = (now + timedelta(days=days_until_saturday)).replace(hour=8, minute=0, second=0, microsecond=0)
+
+                sample_times = [
+                    (monday.replace(hour=8), "Monday Morning Rush"),
+                    (monday.replace(hour=17), "Monday Evening Rush"),
+                    (saturday.replace(hour=8), "Saturday Morning"),
+                    (saturday.replace(hour=17), "Saturday Evening"),
+                ]
+                total_calls = len(routes) * len(sample_times)
+
+            else:  # full_week or custom
+                self.progress.emit(f"📊 Collecting typical traffic for {self.days} days, {self.samples_per_day} samples/day...")
+                now = datetime.now()
+                days_until_monday = (7 - now.weekday()) % 7 or 7
+                start_date = (now + timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+                hours_options = [0, 3, 6, 8, 12, 17, 20, 23]
+                hours_to_sample = hours_options[:self.samples_per_day]
+
+                sample_times = []
+                for day in range(self.days):
+                    current_date = start_date + timedelta(days=day)
+                    day_name = current_date.strftime('%A')
+                    for hour in hours_to_sample:
+                        sample_time = current_date.replace(hour=hour, minute=0)
+                        description = f"{day_name} {hour:02d}:00"
+                        sample_times.append((sample_time, description))
+
+                total_calls = len(routes) * len(sample_times)
+
+            self.progress.emit(f"Total API calls to make: {total_calls}")
+            call_count = 0
+
+            # Collect for each sample time
+            for sample_time, description in sample_times:
+                if not self.running:
+                    self.progress.emit("⏹️ Collection stopped by user")
+                    break
+
+                self.progress.emit(f"\n⏰ {description}")
+
+                for route in routes:
+                    if not self.running:
+                        break
+
+                    call_count += 1
+                    route_name = route['name']
+
+                    try:
+                        origin = f"{route['origin_lat']},{route['origin_lon']}"
+                        destination = f"{route['dest_lat']},{route['dest_lon']}"
+                        departure_timestamp = int(sample_time.timestamp())
+
+                        params = {
+                            'origin': origin,
+                            'destination': destination,
+                            'mode': 'driving',
+                            'departure_time': departure_timestamp,
+                            'key': self.api_key
+                        }
+
+                        # Rate limiting
+                        time.sleep(1.0)
+
+                        response = requests.get(
+                            "https://maps.googleapis.com/maps/api/directions/json",
+                            params=params,
+                            timeout=10
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+
+                        if data['status'] == 'OK':
+                            route_data = data['routes'][0]['legs'][0]
+                            distance_meters = route_data['distance']['value']
+
+                            if 'duration_in_traffic' in route_data:
+                                travel_time = route_data['duration_in_traffic']['value']
+                            else:
+                                travel_time = route_data['duration']['value']
+
+                            speed_kmh = (distance_meters / 1000) / (travel_time / 3600) if travel_time > 0 else 0
+
+                            # Store with coordinates (no route_id for network-based collection)
+                            db.store_real_traffic_data(
+                                route_id=None,
+                                travel_time_seconds=travel_time,
+                                distance_meters=distance_meters,
+                                traffic_delay_seconds=0,
+                                speed_kmh=round(speed_kmh, 2),
+                                data_source=f'google_typical_{description.lower().replace(" ", "_")}',
+                                raw_data=data,
+                                timestamp=sample_time,
+                                origin_lat=route['origin_lat'],
+                                origin_lon=route['origin_lon'],
+                                dest_lat=route['dest_lat'],
+                                dest_lon=route['dest_lon'],
+                                area_id=None
+                            )
+
+                            total_collected += 1
+                            self.progress.emit(f"✅ [{call_count}/{total_calls}] {route_name[:40]} - {speed_kmh:.1f} km/h")
+                        else:
+                            total_failed += 1
+                            self.progress.emit(f"❌ [{call_count}/{total_calls}] {route_name[:40]} - API Error: {data['status']}")
+
+                        # Update status
+                        self.status_update.emit(total_collected, total_failed, total_calls)
+
+                    except Exception as e:
+                        total_failed += 1
+                        self.progress.emit(f"❌ [{call_count}/{total_calls}] {route_name[:40]} - Error: {str(e)[:30]}")
+                        self.status_update.emit(total_collected, total_failed, total_calls)
+
+            # Final summary
+            success_rate = (total_collected / (total_collected + total_failed) * 100) if (total_collected + total_failed) > 0 else 0
+            self.progress.emit(f"\n{'='*60}")
+            self.progress.emit(f"✅ Collection Complete!")
+            self.progress.emit(f"✅ Collected: {total_collected} | ❌ Failed: {total_failed}")
+            self.progress.emit(f"📊 Success rate: {success_rate:.1f}%")
+            self.progress.emit(f"{'='*60}")
+
+            self.finished.emit({
+                'success': True,
+                'collected': total_collected,
+                'failed': total_failed,
+                'success_rate': success_rate
+            })
+
+        except Exception as e:
+            self.progress.emit(f"❌ Fatal error: {str(e)}")
+            import traceback
+            self.progress.emit(traceback.format_exc())
+            self.finished.emit({'success': False, 'collected': total_collected, 'failed': total_failed})
+
+    def stop(self):
+        """Stop the collection"""
+        self.running = False
+
+class RealTimeTrafficCollectionWorker(QThread):
+    """Background thread for continuous real-time traffic collection"""
+    progress = pyqtSignal(str)
+    status_update = pyqtSignal(int, int)  # (current_collection, total_collections)
+    finished = pyqtSignal()
+
+    def __init__(self, api_key, interval_minutes=15, duration_hours=24,
+                 network_file=None, network_bbox=None, num_routes=20):
+        super().__init__()
+        self.api_key = api_key
+        self.interval_minutes = interval_minutes
+        self.duration_hours = duration_hours
+        self.network_file = network_file
+        self.network_bbox = network_bbox
+        self.num_routes = num_routes
+        self.running = True
+
+    def run(self):
+        import time
+        import requests
+        from datetime import datetime
+        from modules.simple_route_generator import SimpleRouteGenerator
+
+        try:
+            # Generate random sample routes within the network
+            if not self.network_file or not self.network_bbox:
+                self.progress.emit("❌ No network selected!")
+                self.finished.emit()
+                return
+
+            self.progress.emit(f"🗺️ Generating {self.num_routes} random routes in network...")
+            route_gen = SimpleRouteGenerator(self.network_file)
+            bbox = self.network_bbox
+            routes = route_gen.generate_random_routes(
+                self.num_routes,
+                bbox['south'],
+                bbox['north'],
+                bbox['west'],
+                bbox['east']
+            )
+
+            if not routes:
+                self.progress.emit("❌ Failed to generate routes!")
+                self.finished.emit()
+                return
+
+            self.progress.emit(f"✅ Generated {len(routes)} sample routes")
+            db = get_db()
+
+            start_time = time.time()
+            collection_count = 0
+            total_collections = int((self.duration_hours * 60) / self.interval_minutes)
+
+            self.progress.emit(f"🔄 Starting real-time traffic collection...")
+            self.progress.emit(f"📍 Routes: {len(routes)} | ⏱️ Interval: {self.interval_minutes} min | 🕐 Duration: {self.duration_hours} hours")
+
+            while self.running:
+                collection_count += 1
+                self.progress.emit(f"\n📡 Collection #{collection_count}/{total_collections} - {datetime.now().strftime('%H:%M:%S')}")
+
+                collected_this_round = 0
+                failed_this_round = 0
+
+                for route in routes:
+                    if not self.running:
+                        break
+
+                    route_name = route['name']
+
+                    try:
+                        origin = f"{route['origin_lat']},{route['origin_lon']}"
+                        destination = f"{route['dest_lat']},{route['dest_lon']}"
+
+                        # Use 'now' instead of departure_time for real-time traffic
+                        params = {
+                            'origin': origin,
+                            'destination': destination,
+                            'mode': 'driving',
+                            'departure_time': 'now',
+                            'key': self.api_key
+                        }
+
+                        time.sleep(1.0)
+
+                        response = requests.get(
+                            "https://maps.googleapis.com/maps/api/directions/json",
+                            params=params,
+                            timeout=10
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+
+                        if data['status'] == 'OK':
+                            route_data = data['routes'][0]['legs'][0]
+                            distance_meters = route_data['distance']['value']
+
+                            if 'duration_in_traffic' in route_data:
+                                travel_time = route_data['duration_in_traffic']['value']
+                            else:
+                                travel_time = route_data['duration']['value']
+
+                            speed_kmh = (distance_meters / 1000) / (travel_time / 3600) if travel_time > 0 else 0
+
+                            # Store with coordinates (no route_id for network-based collection)
+                            db.store_real_traffic_data(
+                                route_id=None,
+                                travel_time_seconds=travel_time,
+                                distance_meters=distance_meters,
+                                traffic_delay_seconds=0,
+                                speed_kmh=round(speed_kmh, 2),
+                                data_source='google_realtime',
+                                raw_data=data,
+                                timestamp=datetime.now(),
+                                origin_lat=route['origin_lat'],
+                                origin_lon=route['origin_lon'],
+                                dest_lat=route['dest_lat'],
+                                dest_lon=route['dest_lon'],
+                                area_id=None
+                            )
+
+                            collected_this_round += 1
+                            self.progress.emit(f"  ✅ {route_name[:45]} - {speed_kmh:.1f} km/h")
+                        else:
+                            failed_this_round += 1
+                            self.progress.emit(f"  ❌ {route_name[:45]} - {data['status']}")
+
+                    except Exception as e:
+                        failed_this_round += 1
+                        self.progress.emit(f"  ❌ {route_name[:45]} - {str(e)[:30]}")
+
+                self.progress.emit(f"Round complete: ✅ {collected_this_round} collected, ❌ {failed_this_round} failed")
+                self.status_update.emit(collection_count, total_collections)
+
+                # Check if we should stop
+                elapsed_hours = (time.time() - start_time) / 3600
+                if elapsed_hours >= self.duration_hours:
+                    self.progress.emit(f"\n✅ Completed {self.duration_hours} hours of real-time collection!")
+                    break
+
+                # Wait for next collection
+                if self.running:
+                    self.progress.emit(f"⏳ Waiting {self.interval_minutes} minutes until next collection...")
+                    for _ in range(self.interval_minutes * 60):
+                        if not self.running:
+                            break
+                        time.sleep(1)
+
+            self.progress.emit("Collection stopped")
+            self.finished.emit()
+
+        except Exception as e:
+            self.progress.emit(f"❌ Fatal error: {str(e)}")
+            import traceback
+            self.progress.emit(traceback.format_exc())
+            self.finished.emit()
+
+    def stop(self):
+        """Stop the collection"""
+        self.running = False
+
 class MapBridge(QObject):
     """Bridge for JavaScript to Python communication"""
     regionSelected = pyqtSignal(str)  # emits JSON coords
@@ -347,7 +707,11 @@ class MainWindow(QWidget):
         # Tab 7: Results & Analysis (NEW)
         self.tab_results = self.create_results_tab()
         self.tabs.addTab(self.tab_results, "📈 Results & Analysis")
-        
+
+        # Tab 8: Data Collection (TYPICAL & REAL-TIME)
+        self.tab_data_collection = self.create_data_collection_tab()
+        self.tabs.addTab(self.tab_data_collection, "📡 Data Collection")
+
         main_layout.addWidget(self.tabs)
         
         # Status bar
@@ -1445,6 +1809,9 @@ class MainWindow(QWidget):
             "Scenario ID", "Date", "Error %", "Similarity %", "Status"
         ])
         self.scenarios_table.horizontalHeader().setStretchLastSection(True)
+        self.scenarios_table.setMinimumHeight(400)  # Ensure table has good height
+        self.scenarios_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.scenarios_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         scenarios_layout.addWidget(self.scenarios_table)
         
         btn_layout = QHBoxLayout()
@@ -1620,6 +1987,12 @@ class MainWindow(QWidget):
         # Set the scroll content
         scroll.setWidget(scroll_content)
         main_layout.addWidget(scroll)
+
+        # Auto-load scenarios on tab creation
+        try:
+            self.refresh_scenarios()
+        except Exception as e:
+            print(f"[WARNING] Could not auto-load scenarios: {e}")
 
         return tab
 
@@ -1844,6 +2217,690 @@ class MainWindow(QWidget):
             print("[DEBUG] JavaScript injected")
         else:
             self.log("Map failed to load", "ERROR")
+
+    # ============== TAB 8: DATA COLLECTION ==============
+
+    def create_data_collection_tab(self):
+        """Create independent data collection tab for typical and real-time traffic"""
+        from PyQt6.QtWidgets import QScrollArea, QRadioButton, QButtonGroup
+
+        tab = QWidget()
+        main_layout = QVBoxLayout(tab)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Container widget for scrollable content
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # Header
+        header = QLabel("📡 Traffic Data Collection Hub")
+        header.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        layout.addWidget(header)
+
+        description = QLabel(
+            "Collect traffic patterns from Google Maps API:\n"
+            "• Typical Traffic: Historical patterns for specific days/times (uses departure_time parameter)\n"
+            "• Real-Time Traffic: Current traffic conditions (continuous collection)"
+        )
+        description.setWordWrap(True)
+        description.setStyleSheet("padding: 10px; background: #E3F2FD; border-radius: 5px;")
+        layout.addWidget(description)
+
+        # API Key Section
+        api_group = QGroupBox("🔑 API Configuration")
+        api_layout = QVBoxLayout(api_group)
+
+        api_status_layout = QHBoxLayout()
+        self.dc_api_status_label = QLabel("API Key: " + ("✅ Configured" if self.api_key else "❌ Not configured"))
+        api_status_layout.addWidget(self.dc_api_status_label)
+
+        dc_config_api_btn = QPushButton("⚙️ Configure API Key")
+        dc_config_api_btn.clicked.connect(self.configure_api_key)
+        api_status_layout.addWidget(dc_config_api_btn)
+        api_status_layout.addStretch()
+        api_layout.addLayout(api_status_layout)
+
+        layout.addWidget(api_group)
+
+        # Network Selection Section
+        network_selection_group = QGroupBox("🗺️ Network Selection")
+        network_selection_layout = QVBoxLayout(network_selection_group)
+
+        network_info = QLabel(
+            "Select a cached network and specify how many sample routes to collect data for."
+        )
+        network_info.setWordWrap(True)
+        network_info.setStyleSheet("padding: 5px; background: #E3F2FD; border-radius: 5px;")
+        network_selection_layout.addWidget(network_info)
+
+        # Network selector
+        network_select_layout = QHBoxLayout()
+        network_select_layout.addWidget(QLabel("Cached Network:"))
+
+        self.dc_network_selector_combo = QComboBox()
+        self.dc_network_selector_combo.setMinimumWidth(350)
+        self.dc_network_selector_combo.currentIndexChanged.connect(self.dc_on_network_selected)
+        network_select_layout.addWidget(self.dc_network_selector_combo)
+
+        refresh_networks_btn = QPushButton("🔄 Refresh")
+        refresh_networks_btn.clicked.connect(self.dc_load_cached_networks)
+        network_select_layout.addWidget(refresh_networks_btn)
+
+        network_select_layout.addStretch()
+        network_selection_layout.addLayout(network_select_layout)
+
+        # Network info display
+        self.dc_network_info_label = QLabel("No network selected")
+        self.dc_network_info_label.setStyleSheet("padding: 10px; background: #FFF3E0; border-radius: 5px;")
+        self.dc_network_info_label.setWordWrap(True)
+        network_selection_layout.addWidget(self.dc_network_info_label)
+
+        # Sample routes count
+        sample_routes_layout = QHBoxLayout()
+        sample_routes_layout.addWidget(QLabel("Sample Routes to Generate:"))
+        self.dc_num_sample_routes_spin = QSpinBox()
+        self.dc_num_sample_routes_spin.setRange(5, 100)
+        self.dc_num_sample_routes_spin.setValue(20)
+        self.dc_num_sample_routes_spin.setToolTip("Number of random routes to generate within the network for data collection")
+        self.dc_num_sample_routes_spin.valueChanged.connect(self.dc_update_api_call_estimate)
+        sample_routes_layout.addWidget(self.dc_num_sample_routes_spin)
+        sample_routes_layout.addStretch()
+        network_selection_layout.addLayout(sample_routes_layout)
+
+        layout.addWidget(network_selection_group)
+
+        # Store selected network
+        self.dc_selected_network_file = None
+        self.dc_selected_network_bbox = None
+
+        # Collection Mode Selection
+        mode_group = QGroupBox("📊 Collection Mode")
+        mode_layout = QVBoxLayout(mode_group)
+
+        self.dc_mode_button_group = QButtonGroup()
+
+        self.dc_typical_radio = QRadioButton("Typical Traffic Collection (Historical Patterns)")
+        self.dc_typical_radio.setChecked(True)
+        self.dc_typical_radio.toggled.connect(self.dc_mode_changed)
+        self.dc_mode_button_group.addButton(self.dc_typical_radio)
+        mode_layout.addWidget(self.dc_typical_radio)
+
+        self.dc_realtime_radio = QRadioButton("Real-Time Traffic Collection (Continuous)")
+        self.dc_realtime_radio.toggled.connect(self.dc_mode_changed)
+        self.dc_mode_button_group.addButton(self.dc_realtime_radio)
+        mode_layout.addWidget(self.dc_realtime_radio)
+
+        layout.addWidget(mode_group)
+
+        # Typical Traffic Options (shown when typical mode selected)
+        self.dc_typical_options_group = QGroupBox("⏰ Typical Traffic Collection Options")
+        typical_options_layout = QVBoxLayout(self.dc_typical_options_group)
+
+        typical_info = QLabel(
+            "Collects traffic patterns using specific departure times to simulate different days/hours.\n"
+            "This gives you historical typical traffic patterns without waiting."
+        )
+        typical_info.setWordWrap(True)
+        typical_info.setStyleSheet("padding: 8px; background: #E8F5E9; border-radius: 5px; font-size: 10pt;")
+        typical_options_layout.addWidget(typical_info)
+
+        # Mode selection
+        typical_mode_layout = QHBoxLayout()
+        typical_mode_layout.addWidget(QLabel("Collection Pattern:"))
+
+        self.dc_typical_mode_combo = QComboBox()
+        self.dc_typical_mode_combo.addItems([
+            "Full Week (7 days, comprehensive)",
+            "Peak Hours Only (quick, 4 samples)",
+            "Custom (specify days and samples)"
+        ])
+        self.dc_typical_mode_combo.currentIndexChanged.connect(self.dc_typical_mode_changed)
+        typical_mode_layout.addWidget(self.dc_typical_mode_combo)
+        typical_mode_layout.addStretch()
+        typical_options_layout.addLayout(typical_mode_layout)
+
+        # Custom options (hidden by default)
+        self.dc_custom_options_widget = QWidget()
+        custom_options_layout = QHBoxLayout(self.dc_custom_options_widget)
+        custom_options_layout.setContentsMargins(0, 0, 0, 0)
+
+        custom_options_layout.addWidget(QLabel("Number of Days:"))
+        self.dc_custom_days_spin = QSpinBox()
+        self.dc_custom_days_spin.setRange(1, 7)
+        self.dc_custom_days_spin.setValue(3)
+        self.dc_custom_days_spin.setToolTip("Number of days to simulate (1-7)")
+        custom_options_layout.addWidget(self.dc_custom_days_spin)
+
+        custom_options_layout.addWidget(QLabel("Samples per Day:"))
+        self.dc_custom_samples_spin = QSpinBox()
+        self.dc_custom_samples_spin.setRange(1, 8)
+        self.dc_custom_samples_spin.setValue(4)
+        self.dc_custom_samples_spin.setToolTip("Time samples per day (1-8)")
+        custom_options_layout.addWidget(self.dc_custom_samples_spin)
+
+        custom_options_layout.addStretch()
+        self.dc_custom_options_widget.setVisible(False)
+        typical_options_layout.addWidget(self.dc_custom_options_widget)
+
+        # API call estimate
+        self.dc_api_calls_label = QLabel("Estimated API calls: 0")
+        self.dc_api_calls_label.setStyleSheet("padding: 5px; background: #FFFDE7; border-radius: 5px; font-weight: bold;")
+        typical_options_layout.addWidget(self.dc_api_calls_label)
+
+        # Start button for typical
+        self.dc_start_typical_btn = QPushButton("🚀 Start Typical Traffic Collection")
+        self.dc_start_typical_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 12px; font-weight: bold; font-size: 11pt;")
+        self.dc_start_typical_btn.clicked.connect(self.dc_start_typical_collection)
+        typical_options_layout.addWidget(self.dc_start_typical_btn)
+
+        layout.addWidget(self.dc_typical_options_group)
+
+        # Real-Time Traffic Options (shown when real-time mode selected)
+        self.dc_realtime_options_group = QGroupBox("🔄 Real-Time Traffic Collection Options")
+        realtime_options_layout = QVBoxLayout(self.dc_realtime_options_group)
+
+        realtime_info = QLabel(
+            "Collects current traffic conditions at regular intervals.\n"
+            "Uses 'departure_time=now' to get real-time traffic data."
+        )
+        realtime_info.setWordWrap(True)
+        realtime_info.setStyleSheet("padding: 8px; background: #E3F2FD; border-radius: 5px; font-size: 10pt;")
+        realtime_options_layout.addWidget(realtime_info)
+
+        # Interval and duration
+        realtime_params_layout = QHBoxLayout()
+
+        realtime_params_layout.addWidget(QLabel("Collection Interval:"))
+        self.dc_realtime_interval_spin = QSpinBox()
+        self.dc_realtime_interval_spin.setRange(5, 60)
+        self.dc_realtime_interval_spin.setValue(15)
+        self.dc_realtime_interval_spin.setSuffix(" minutes")
+        self.dc_realtime_interval_spin.setToolTip("How often to collect data (5-60 minutes)")
+        realtime_params_layout.addWidget(self.dc_realtime_interval_spin)
+
+        realtime_params_layout.addWidget(QLabel("Duration:"))
+        self.dc_realtime_duration_spin = QSpinBox()
+        self.dc_realtime_duration_spin.setRange(1, 168)
+        self.dc_realtime_duration_spin.setValue(24)
+        self.dc_realtime_duration_spin.setSuffix(" hours")
+        self.dc_realtime_duration_spin.setToolTip("How long to collect data (1-168 hours)")
+        realtime_params_layout.addWidget(self.dc_realtime_duration_spin)
+
+        realtime_params_layout.addStretch()
+        realtime_options_layout.addLayout(realtime_params_layout)
+
+        # Estimated collections
+        self.dc_realtime_collections_label = QLabel("Estimated collections: 0")
+        self.dc_realtime_collections_label.setStyleSheet("padding: 5px; background: #FFFDE7; border-radius: 5px; font-weight: bold;")
+        realtime_options_layout.addWidget(self.dc_realtime_collections_label)
+
+        # Start/Stop buttons for real-time
+        realtime_buttons_layout = QHBoxLayout()
+
+        self.dc_start_realtime_btn = QPushButton("🚀 Start Real-Time Collection")
+        self.dc_start_realtime_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 12px; font-weight: bold; font-size: 11pt;")
+        self.dc_start_realtime_btn.clicked.connect(self.dc_start_realtime_collection)
+        realtime_buttons_layout.addWidget(self.dc_start_realtime_btn)
+
+        self.dc_stop_realtime_btn = QPushButton("⏹️ Stop Collection")
+        self.dc_stop_realtime_btn.setStyleSheet("background-color: #f44336; color: white; padding: 12px; font-weight: bold; font-size: 11pt;")
+        self.dc_stop_realtime_btn.setEnabled(False)
+        self.dc_stop_realtime_btn.clicked.connect(self.dc_stop_realtime_collection)
+        realtime_buttons_layout.addWidget(self.dc_stop_realtime_btn)
+
+        realtime_options_layout.addLayout(realtime_buttons_layout)
+
+        self.dc_realtime_options_group.setVisible(False)
+        layout.addWidget(self.dc_realtime_options_group)
+
+        # Progress Section
+        progress_group = QGroupBox("📊 Collection Progress")
+        progress_layout = QVBoxLayout(progress_group)
+
+        self.dc_progress_bar = QProgressBar()
+        self.dc_progress_bar.setValue(0)
+        progress_layout.addWidget(self.dc_progress_bar)
+
+        self.dc_status_label = QLabel("Ready to collect data")
+        self.dc_status_label.setStyleSheet("padding: 5px; background: #F5F5F5; border-radius: 5px;")
+        progress_layout.addWidget(self.dc_status_label)
+
+        # Stats display
+        stats_layout = QHBoxLayout()
+
+        self.dc_collected_label = QLabel("✅ Collected: 0")
+        self.dc_collected_label.setStyleSheet("padding: 5px; background: #C8E6C9; border-radius: 5px; font-weight: bold;")
+        stats_layout.addWidget(self.dc_collected_label)
+
+        self.dc_failed_label = QLabel("❌ Failed: 0")
+        self.dc_failed_label.setStyleSheet("padding: 5px; background: #FFCDD2; border-radius: 5px; font-weight: bold;")
+        stats_layout.addWidget(self.dc_failed_label)
+
+        self.dc_success_rate_label = QLabel("📊 Success Rate: 0%")
+        self.dc_success_rate_label.setStyleSheet("padding: 5px; background: #E1BEE7; border-radius: 5px; font-weight: bold;")
+        stats_layout.addWidget(self.dc_success_rate_label)
+
+        stats_layout.addStretch()
+        progress_layout.addLayout(stats_layout)
+
+        layout.addWidget(progress_group)
+
+        # Log Output
+        log_group = QGroupBox("📝 Collection Log")
+        log_layout = QVBoxLayout(log_group)
+
+        self.dc_log_text = QTextEdit()
+        self.dc_log_text.setReadOnly(True)
+        self.dc_log_text.setMaximumHeight(300)
+        self.dc_log_text.setStyleSheet("font-family: 'Courier New'; font-size: 9pt;")
+        log_layout.addWidget(self.dc_log_text)
+
+        clear_log_btn = QPushButton("🗑️ Clear Log")
+        clear_log_btn.clicked.connect(lambda: self.dc_log_text.clear())
+        log_layout.addWidget(clear_log_btn)
+
+        layout.addWidget(log_group)
+
+        # Set the scroll content
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
+
+        # Initialize worker references
+        self.dc_typical_worker = None
+        self.dc_realtime_worker = None
+
+        # Initial setup
+        self.dc_load_cached_networks()
+        self.dc_update_api_call_estimate()
+        self.dc_update_realtime_collections_estimate()
+
+        return tab
+
+    # Data Collection Tab Helper Methods
+
+    def dc_load_cached_networks(self):
+        """Load cached networks into dropdown"""
+        from modules.network_builder import get_cached_networks
+        import glob
+
+        self.dc_network_selector_combo.clear()
+        self.dc_network_selector_combo.addItem("-- Select a cached network --")
+
+        cache_dir = os.path.join("data", "networks")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        try:
+            cached_networks = get_cached_networks(cache_dir)
+
+            if cached_networks:
+                for cache in cached_networks:
+                    bbox = cache['bbox']
+                    display_text = (
+                        f"{cache['location']} "
+                        f"({cache['nodes']:,} nodes, {cache['edges']:,} edges)"
+                    )
+                    self.dc_network_selector_combo.addItem(display_text)
+                    # Store the cache data
+                    self.dc_network_selector_combo.setItemData(
+                        self.dc_network_selector_combo.count() - 1,
+                        cache
+                    )
+
+                self.dc_network_info_label.setText(
+                    f"✅ Found {len(cached_networks)} cached network(s)\n"
+                    f"Select one from the dropdown above to collect data"
+                )
+                self.dc_network_info_label.setStyleSheet("padding: 10px; background: #C8E6C9; border-radius: 5px;")
+            else:
+                self.dc_network_info_label.setText(
+                    "⚠️ No cached networks found!\n"
+                    "Please create a network first in the 'Map & Simulation' tab."
+                )
+                self.dc_network_info_label.setStyleSheet("padding: 10px; background: #FFCDD2; border-radius: 5px;")
+
+        except Exception as e:
+            print(f"[DC] Error loading networks: {e}")
+            self.dc_network_info_label.setText(f"❌ Error loading networks: {str(e)}")
+            self.dc_network_info_label.setStyleSheet("padding: 10px; background: #FFCDD2; border-radius: 5px;")
+
+    def dc_on_network_selected(self, index):
+        """Handle network selection"""
+        if index <= 0:  # First item is placeholder
+            self.dc_selected_network_file = None
+            self.dc_selected_network_bbox = None
+            self.dc_network_info_label.setText("No network selected")
+            self.dc_network_info_label.setStyleSheet("padding: 10px; background: #FFF3E0; border-radius: 5px;")
+            return
+
+        cache = self.dc_network_selector_combo.itemData(index)
+        if not cache:
+            return
+
+        self.dc_selected_network_file = cache.get('net_file')
+        self.dc_selected_network_bbox = cache['bbox']
+
+        bbox = cache['bbox']
+        lat_diff = abs(bbox['north'] - bbox['south'])
+        lon_diff = abs(bbox['east'] - bbox['west'])
+        area_km2 = lat_diff * lon_diff * 111 * 111
+
+        self.dc_network_info_label.setText(
+            f"✅ Selected: {cache['location']}\n"
+            f"📊 Area: {area_km2:.2f} km² | Nodes: {cache['nodes']:,} | Edges: {cache['edges']:,}\n"
+            f"📍 Bounds: ({bbox['south']:.4f}, {bbox['west']:.4f}) to ({bbox['north']:.4f}, {bbox['east']:.4f})"
+        )
+        self.dc_network_info_label.setStyleSheet("padding: 10px; background: #E3F2FD; border-radius: 5px;")
+
+        # Update estimates
+        self.dc_update_api_call_estimate()
+        self.dc_update_realtime_collections_estimate()
+
+    def dc_mode_changed(self):
+        """Handle collection mode change"""
+        is_typical = self.dc_typical_radio.isChecked()
+        self.dc_typical_options_group.setVisible(is_typical)
+        self.dc_realtime_options_group.setVisible(not is_typical)
+
+    def dc_typical_mode_changed(self):
+        """Handle typical collection mode change"""
+        is_custom = self.dc_typical_mode_combo.currentIndex() == 2
+        self.dc_custom_options_widget.setVisible(is_custom)
+        self.dc_update_api_call_estimate()
+
+    def dc_update_api_call_estimate(self):
+        """Update estimated API calls for typical collection"""
+        try:
+            if not self.dc_selected_network_file:
+                self.dc_api_calls_label.setText("Estimated API calls: Select a network first")
+                return
+
+            num_routes = self.dc_num_sample_routes_spin.value()
+            mode_index = self.dc_typical_mode_combo.currentIndex()
+
+            if mode_index == 0:  # Full week
+                samples = 7 * 8
+            elif mode_index == 1:  # Peak hours
+                samples = 4
+            else:  # Custom
+                days = self.dc_custom_days_spin.value()
+                samples_per_day = self.dc_custom_samples_spin.value()
+                samples = days * samples_per_day
+
+            total_calls = num_routes * samples
+            self.dc_api_calls_label.setText(
+                f"Estimated API calls: {total_calls} "
+                f"({num_routes} sample routes × {samples} time samples)"
+            )
+
+        except Exception as e:
+            self.dc_api_calls_label.setText(f"Error: {str(e)}")
+
+    def dc_update_realtime_collections_estimate(self):
+        """Update estimated collections for real-time"""
+        try:
+            if not self.dc_selected_network_file:
+                self.dc_realtime_collections_label.setText("Estimated collections: Select a network first")
+                return
+
+            num_routes = self.dc_num_sample_routes_spin.value()
+            interval = self.dc_realtime_interval_spin.value()
+            duration = self.dc_realtime_duration_spin.value()
+
+            num_collections = int((duration * 60) / interval)
+            total_calls = num_routes * num_collections
+
+            self.dc_realtime_collections_label.setText(
+                f"Estimated collections: {num_collections} rounds "
+                f"({total_calls} total API calls: {num_routes} sample routes × {num_collections} collections)"
+            )
+
+        except Exception as e:
+            self.dc_realtime_collections_label.setText(f"Error: {str(e)}")
+
+    def dc_start_typical_collection(self):
+        """Start typical traffic collection"""
+        if not self.api_key:
+            QMessageBox.warning(self, "API Key Required", "Please configure your Google Maps API key first.")
+            return
+
+        if not self.dc_selected_network_file or not self.dc_selected_network_bbox:
+            QMessageBox.warning(self, "No Network Selected", "Please select a cached network first.")
+            return
+
+        num_routes = self.dc_num_sample_routes_spin.value()
+
+        # Determine collection parameters
+        mode_index = self.dc_typical_mode_combo.currentIndex()
+
+        if mode_index == 0:  # Full week
+            collection_mode = 'full_week'
+            days = 7
+            samples_per_day = 8
+        elif mode_index == 1:  # Peak hours
+            collection_mode = 'peak_hours'
+            days = 0
+            samples_per_day = 0
+        else:  # Custom
+            collection_mode = 'custom'
+            days = self.dc_custom_days_spin.value()
+            samples_per_day = self.dc_custom_samples_spin.value()
+
+        # Confirm with user
+        if mode_index == 0:
+            msg = f"Start full week collection?\n\n" \
+                  f"Network: {os.path.basename(self.dc_selected_network_file)}\n" \
+                  f"Sample routes: {num_routes}\n" \
+                  f"Time samples: {days * samples_per_day}\n" \
+                  f"Total API calls: {num_routes * days * samples_per_day}\n\n" \
+                  f"This will take approximately {int(num_routes * days * samples_per_day / 60) + 1} minutes."
+        elif mode_index == 1:
+            msg = f"Start peak hours collection?\n\n" \
+                  f"Network: {os.path.basename(self.dc_selected_network_file)}\n" \
+                  f"Sample routes: {num_routes}\n" \
+                  f"Time samples: 4 (Mon AM/PM, Sat AM/PM)\n" \
+                  f"Total API calls: {num_routes * 4}\n\n" \
+                  f"This will take approximately {int(num_routes * 4 / 60) + 1} minutes."
+        else:
+            total = num_routes * days * samples_per_day
+            msg = f"Start custom collection?\n\n" \
+                  f"Network: {os.path.basename(self.dc_selected_network_file)}\n" \
+                  f"Sample routes: {num_routes}\n" \
+                  f"Days: {days}\n" \
+                  f"Samples per day: {samples_per_day}\n" \
+                  f"Total API calls: {total}\n\n" \
+                  f"This will take approximately {int(total / 60) + 1} minutes."
+
+        reply = QMessageBox.question(self, "Confirm Collection", msg,
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Reset UI
+        self.dc_log_text.clear()
+        self.dc_progress_bar.setValue(0)
+        self.dc_collected_label.setText("✅ Collected: 0")
+        self.dc_failed_label.setText("❌ Failed: 0")
+        self.dc_success_rate_label.setText("📊 Success Rate: 0%")
+        self.dc_status_label.setText("Starting collection...")
+
+        # Disable buttons
+        self.dc_start_typical_btn.setEnabled(False)
+        self.dc_start_realtime_btn.setEnabled(False)
+
+        # Create and start worker with network info
+        self.dc_typical_worker = TypicalTrafficCollectionWorker(
+            self.api_key, collection_mode, days, samples_per_day,
+            self.dc_selected_network_file, self.dc_selected_network_bbox, num_routes
+        )
+        self.dc_typical_worker.progress.connect(self.dc_log_message)
+        self.dc_typical_worker.status_update.connect(self.dc_update_typical_progress)
+        self.dc_typical_worker.finished.connect(self.dc_typical_collection_finished)
+        self.dc_typical_worker.start()
+
+        self.dc_log_message("🚀 Typical traffic collection started...")
+
+    def dc_start_realtime_collection(self):
+        """Start real-time traffic collection"""
+        if not self.api_key:
+            QMessageBox.warning(self, "API Key Required", "Please configure your Google Maps API key first.")
+            return
+
+        if not self.dc_selected_network_file or not self.dc_selected_network_bbox:
+            QMessageBox.warning(self, "No Network Selected", "Please select a cached network first.")
+            return
+
+        num_routes = self.dc_num_sample_routes_spin.value()
+        interval = self.dc_realtime_interval_spin.value()
+        duration = self.dc_realtime_duration_spin.value()
+        num_collections = int((duration * 60) / interval)
+
+        # Confirm with user
+        msg = f"Start real-time traffic collection?\n\n" \
+              f"Network: {os.path.basename(self.dc_selected_network_file)}\n" \
+              f"Sample routes: {num_routes}\n" \
+              f"Interval: {interval} minutes\n" \
+              f"Duration: {duration} hours\n" \
+              f"Collections: {num_collections}\n" \
+              f"Total API calls: {num_routes * num_collections}\n\n" \
+              f"Collection will run in the background."
+
+        reply = QMessageBox.question(self, "Confirm Collection", msg,
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Reset UI
+        self.dc_log_text.clear()
+        self.dc_progress_bar.setMaximum(num_collections)
+        self.dc_progress_bar.setValue(0)
+        self.dc_status_label.setText("Real-time collection running...")
+
+        # Enable/disable buttons
+        self.dc_start_realtime_btn.setEnabled(False)
+        self.dc_stop_realtime_btn.setEnabled(True)
+        self.dc_start_typical_btn.setEnabled(False)
+
+        # Create and start worker with network info
+        self.dc_realtime_worker = RealTimeTrafficCollectionWorker(
+            self.api_key, interval, duration,
+            self.dc_selected_network_file, self.dc_selected_network_bbox, num_routes
+        )
+        self.dc_realtime_worker.progress.connect(self.dc_log_message)
+        self.dc_realtime_worker.status_update.connect(self.dc_update_realtime_progress)
+        self.dc_realtime_worker.finished.connect(self.dc_realtime_collection_finished)
+        self.dc_realtime_worker.start()
+
+        self.dc_log_message("🚀 Real-time traffic collection started...")
+
+    def dc_stop_realtime_collection(self):
+        """Stop real-time collection"""
+        if self.dc_realtime_worker:
+            self.dc_realtime_worker.stop()
+            self.dc_log_message("⏹️ Stopping collection...")
+            self.dc_stop_realtime_btn.setEnabled(False)
+
+    def dc_log_message(self, message):
+        """Add message to collection log"""
+        self.dc_log_text.append(message)
+        # Auto-scroll to bottom
+        cursor = self.dc_log_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.dc_log_text.setTextCursor(cursor)
+
+    def dc_update_typical_progress(self, collected, failed, total):
+        """Update progress for typical collection"""
+        completed = collected + failed
+        progress = int((completed / total) * 100) if total > 0 else 0
+
+        self.dc_progress_bar.setMaximum(total)
+        self.dc_progress_bar.setValue(completed)
+
+        self.dc_collected_label.setText(f"✅ Collected: {collected}")
+        self.dc_failed_label.setText(f"❌ Failed: {failed}")
+
+        success_rate = (collected / completed * 100) if completed > 0 else 0
+        self.dc_success_rate_label.setText(f"📊 Success Rate: {success_rate:.1f}%")
+
+        self.dc_status_label.setText(f"Collecting... {completed}/{total} ({progress}%)")
+
+    def dc_update_realtime_progress(self, current, total):
+        """Update progress for real-time collection"""
+        self.dc_progress_bar.setValue(current)
+        self.dc_status_label.setText(f"Real-time collection: Round {current}/{total}")
+
+    def dc_typical_collection_finished(self, summary):
+        """Handle typical collection completion"""
+        self.dc_start_typical_btn.setEnabled(True)
+        self.dc_start_realtime_btn.setEnabled(True)
+
+        if summary.get('success'):
+            self.dc_status_label.setText(f"✅ Collection complete! Success rate: {summary.get('success_rate', 0):.1f}%")
+            QMessageBox.information(self, "Collection Complete",
+                f"Typical traffic collection finished!\n\n"
+                f"✅ Collected: {summary.get('collected', 0)}\n"
+                f"❌ Failed: {summary.get('failed', 0)}\n"
+                f"📊 Success Rate: {summary.get('success_rate', 0):.1f}%\n\n"
+                f"Data has been stored in the database."
+            )
+        else:
+            self.dc_status_label.setText("❌ Collection failed or stopped")
+
+        self.dc_typical_worker = None
+        self.dc_refresh_route_info()
+
+    def dc_realtime_collection_finished(self):
+        """Handle real-time collection completion"""
+        self.dc_start_realtime_btn.setEnabled(True)
+        self.dc_stop_realtime_btn.setEnabled(False)
+        self.dc_start_typical_btn.setEnabled(True)
+
+        self.dc_status_label.setText("✅ Real-time collection finished")
+        self.dc_log_message("✅ Real-time collection completed")
+
+        self.dc_realtime_worker = None
+        self.dc_refresh_route_info()
+
+    def dc_refresh_route_info(self):
+        """Refresh and display statistics about collected traffic data"""
+        try:
+            db = get_db()
+            all_data = db.get_real_traffic_data()
+
+            if not all_data:
+                self.dc_log_message("\nNo traffic data found in database.")
+                return
+
+            # Count typical vs real-time data
+            typical_count = sum(1 for r in all_data if 'typical' in r.get('data_source', ''))
+            realtime_count = sum(1 for r in all_data if r.get('data_source') == 'google_realtime')
+
+            # Calculate average speed
+            speeds = [r['speed_kmh'] for r in all_data if r.get('speed_kmh')]
+            avg_speed = sum(speeds) / len(speeds) if speeds else 0
+
+            self.dc_log_message(f"\n{'='*60}")
+            self.dc_log_message("DATABASE STATISTICS")
+            self.dc_log_message(f"{'='*60}")
+            self.dc_log_message(f"Total records: {len(all_data)}")
+            self.dc_log_message(f"  Typical traffic: {typical_count}")
+            self.dc_log_message(f"  Real-time traffic: {realtime_count}")
+            self.dc_log_message(f"Average speed: {avg_speed:.2f} km/h")
+            self.dc_log_message(f"{'='*60}\n")
+
+        except Exception as e:
+            self.dc_log_message(f"Error refreshing stats: {str(e)}")
+
+    # ============== ORIGINAL TAB METHODS ==============
 
     def on_search(self):
         """Handle location search"""
@@ -2556,30 +3613,92 @@ class MainWindow(QWidget):
             print(f"Error refreshing dashboard: {e}")
 
     def refresh_scenarios(self):
-        """Refresh scenarios table"""
+        """Refresh scenarios table - shows ALL validation records AND route estimations (up to 100)"""
         try:
             cursor = self.db.conn.cursor()
+            # UNION query: combine validation_metrics with route_estimations
+            # Shows both completed simulations and user route estimations
             cursor.execute("""
-                SELECT scenario_id, timestamp, mape, r_squared
+                SELECT
+                    scenario_id,
+                    timestamp,
+                    mape,
+                    r_squared,
+                    'validation' as source_type
                 FROM validation_metrics
+
+                UNION ALL
+
+                SELECT
+                    COALESCE(scenario_id, 'Route #' || id) as scenario_id,
+                    timestamp,
+                    time_error_percent as mape,
+                    NULL as r_squared,
+                    estimation_type as source_type
+                FROM route_estimations
+
                 ORDER BY timestamp DESC
-                LIMIT 20
+                LIMIT 100
             """)
-            
+
             scenarios = cursor.fetchall()
             self.scenarios_table.setRowCount(len(scenarios))
-            
+
+            print(f"[DEBUG] refresh_scenarios: fetched {len(scenarios)} TOTAL records (validations + route estimations)")
+
             for i, scenario in enumerate(scenarios):
-                self.scenarios_table.setItem(i, 0, QTableWidgetItem(scenario['scenario_id']))
+                source_type = scenario['source_type']
+
+                # Scenario ID (with type indicator)
+                scenario_id = scenario['scenario_id']
+                if source_type != 'validation':
+                    scenario_id = f"[{source_type.upper()}] {scenario_id}"
+                self.scenarios_table.setItem(i, 0, QTableWidgetItem(scenario_id))
+
+                # Timestamp
                 self.scenarios_table.setItem(i, 1, QTableWidgetItem(scenario['timestamp'][:19]))
-                self.scenarios_table.setItem(i, 2, QTableWidgetItem(f"{scenario['mape']:.2f}%"))
-                similarity = scenario['r_squared'] * 100 if scenario['r_squared'] else 0
-                self.scenarios_table.setItem(i, 3, QTableWidgetItem(f"{similarity:.1f}%"))
-                
-                status = "✅ Excellent" if scenario['mape'] < 15 else "✓ Good" if scenario['mape'] < 25 else "⚠️ Fair"
+
+                # MAPE / Error %
+                if scenario['mape'] is not None:
+                    self.scenarios_table.setItem(i, 2, QTableWidgetItem(f"{scenario['mape']:.2f}%"))
+                else:
+                    self.scenarios_table.setItem(i, 2, QTableWidgetItem("N/A"))
+
+                # R² / Similarity %
+                if scenario['r_squared'] is not None:
+                    similarity = scenario['r_squared'] * 100
+                    self.scenarios_table.setItem(i, 3, QTableWidgetItem(f"{similarity:.1f}%"))
+                else:
+                    self.scenarios_table.setItem(i, 3, QTableWidgetItem("N/A"))
+
+                # Status
+                if source_type == 'validation':
+                    if scenario['mape'] is not None:
+                        status = "✅ Excellent" if scenario['mape'] < 15 else "✓ Good" if scenario['mape'] < 25 else "⚠️ Fair"
+                    else:
+                        status = "📊 Validation"
+                elif source_type == 'estimate':
+                    status = "📍 Estimation"
+                elif source_type == 'compare':
+                    if scenario['mape'] is not None and scenario['mape'] < 15:
+                        status = "✅ Compared"
+                    else:
+                        status = "🌐 Compared"
+                elif source_type == 'targeted_simulation':
+                    status = "🎯 Targeted Sim"
+                else:
+                    status = "📊 Unknown"
+
                 self.scenarios_table.setItem(i, 4, QTableWidgetItem(status))
+
+            print(f"[DEBUG] refresh_scenarios: populated {self.scenarios_table.rowCount()} total rows")
+            self.log(f"Loaded {len(scenarios)} records (validations + route estimations)", "INFO")
+
         except Exception as e:
             print(f"Error refreshing scenarios: {e}")
+            import traceback
+            traceback.print_exc()
+            self.log(f"Error loading results: {e}", "ERROR")
 
     # ============== EVENT HANDLERS FOR NEW TABS ==============
 
@@ -3038,13 +4157,20 @@ class MainWindow(QWidget):
         try:
             from modules.results_logger import get_results_logger
 
-            # Get all scenario IDs
+            # Get all scenario IDs from validation_metrics or simulation_results
             cursor = self.db.conn.cursor()
-            cursor.execute("SELECT DISTINCT scenario_id FROM area_comparisons ORDER BY timestamp DESC LIMIT 10")
+
+            # Try validation_metrics first (limit to 100 most recent)
+            cursor.execute("SELECT DISTINCT scenario_id FROM validation_metrics ORDER BY timestamp DESC LIMIT 100")
             scenarios = [row[0] for row in cursor.fetchall()]
 
+            # If no validation metrics, try simulation_results
             if not scenarios:
-                QMessageBox.information(self, "No Data", "No scenarios found to generate report.")
+                cursor.execute("SELECT DISTINCT scenario_id FROM simulation_results ORDER BY timestamp DESC LIMIT 100")
+                scenarios = [row[0] for row in cursor.fetchall()]
+
+            if not scenarios:
+                QMessageBox.information(self, "No Data", "No scenarios found to generate report.\n\nRun some simulations first!")
                 return
 
             self.log(f"Generating summary report for {len(scenarios)} scenarios...", "INFO")
@@ -3067,6 +4193,8 @@ class MainWindow(QWidget):
 
         except Exception as e:
             self.log(f"❌ Report generation failed: {str(e)}", "ERROR")
+            import traceback
+            traceback.print_exc()
             QMessageBox.warning(self, "Error", f"Could not generate report: {str(e)}")
 
     def export_results(self):
@@ -3393,6 +4521,24 @@ class MainWindow(QWidget):
                 f"Now click '📍 Estimate Travel Time' to get accurate results!"
             )
 
+            # Save to database
+            try:
+                self.db.store_route_estimation(
+                    origin_lat=self.route_origin['lat'],
+                    origin_lon=self.route_origin['lon'],
+                    dest_lat=self.route_destination['lat'],
+                    dest_lon=self.route_destination['lon'],
+                    estimation_type='targeted_simulation',
+                    google_distance_km=real_distance,
+                    google_travel_time_minutes=real_travel_time / 60,
+                    google_avg_speed_kmh=real_world_speed,
+                    scenario_id=scenario_id,
+                    notes=f"Targeted simulation with {num_vehicles} vehicles, {congestion_desc}"
+                )
+                print(f"[TARGETED_SIM] ✅ Saved to database")
+            except Exception as db_error:
+                print(f"[TARGETED_SIM] Warning: Could not save to database: {db_error}")
+
             QMessageBox.information(self, "Simulation Complete",
                 "Targeted simulation finished!\n\n"
                 "Your selected route now has traffic data.\n"
@@ -3673,6 +4819,25 @@ class MainWindow(QWidget):
             self.route_estimate_text.setText(text)
             self.log(f"Route estimated: {result['distance_km']:.2f} km in {result['travel_time_minutes']:.1f} min", "SUCCESS")
 
+            # Save to database
+            try:
+                self.db.store_route_estimation(
+                    origin_lat=from_lat,
+                    origin_lon=from_lon,
+                    dest_lat=to_lat,
+                    dest_lon=to_lon,
+                    estimation_type='estimate',
+                    sim_distance_km=result['distance_km'],
+                    sim_travel_time_minutes=result['travel_time_minutes'],
+                    sim_avg_speed_kmh=result['average_speed_kmh'],
+                    sim_data_coverage=result['data_coverage'],
+                    scenario_id=scenario_id,
+                    notes=f"Route estimation (data coverage: {result['data_coverage']:.1f}%)"
+                )
+                print(f"[ROUTE_ESTIMATE] ✅ Saved to database")
+            except Exception as db_error:
+                print(f"[ROUTE_ESTIMATE] Warning: Could not save to database: {db_error}")
+
         except Exception as e:
             self.route_estimate_text.setText(f"❌ Error: {str(e)}")
             self.log(f"Route estimation error: {str(e)}", "ERROR")
@@ -3783,6 +4948,34 @@ class MainWindow(QWidget):
 
             self.route_estimate_text.setText(text)
             self.log(f"Route compared: {result.get('comparison', {}).get('time_error_percent', 0):.1f}% error", "SUCCESS")
+
+            # Save to database
+            try:
+                gm = result.get('google_maps', {})
+                comp = result.get('comparison', {})
+
+                self.db.store_route_estimation(
+                    origin_lat=from_lat,
+                    origin_lon=from_lon,
+                    dest_lat=to_lat,
+                    dest_lon=to_lon,
+                    estimation_type='compare',
+                    sim_distance_km=result['distance_km'],
+                    sim_travel_time_minutes=result['travel_time_minutes'],
+                    sim_avg_speed_kmh=result['average_speed_kmh'],
+                    sim_data_coverage=result['data_coverage'],
+                    google_distance_km=gm.get('distance_meters', 0) / 1000 if gm else None,
+                    google_travel_time_minutes=gm.get('travel_time_minutes') if gm else None,
+                    google_avg_speed_kmh=gm.get('speed_kmh') if gm else None,
+                    google_traffic_delay_seconds=gm.get('traffic_delay_seconds') if gm else None,
+                    time_error_percent=comp.get('time_error_percent') if comp else None,
+                    speed_error_percent=comp.get('speed_error_percent') if comp else None,
+                    scenario_id=scenario_id,
+                    notes=f"Comparison with Google Maps (accuracy: {comp.get('time_error_percent', 0):.1f}% error)"
+                )
+                print(f"[ROUTE_COMPARE] ✅ Saved to database")
+            except Exception as db_error:
+                print(f"[ROUTE_COMPARE] Warning: Could not save to database: {db_error}")
 
         except Exception as e:
             self.route_estimate_text.setText(f"❌ Error: {str(e)}")

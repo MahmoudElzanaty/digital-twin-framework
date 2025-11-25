@@ -19,7 +19,8 @@
       "Bash(Get-ChildItem \"C:\\Users\\mondy\\OneDrive\\Desktop\\Bachelors\\digital_twin_framework\" -Recurse)",
       "Bash(Where-Object {$_xtension -eq \".db\"})",
       "Bash(Select-Object FullName)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []

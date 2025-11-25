@@ -277,6 +277,31 @@ class DigitalTwinDatabase:
             )
         """)
 
+        # NEW TABLE: Route Estimations (user route estimates + comparisons)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS route_estimations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                origin_lat REAL NOT NULL,
+                origin_lon REAL NOT NULL,
+                dest_lat REAL NOT NULL,
+                dest_lon REAL NOT NULL,
+                estimation_type TEXT NOT NULL,
+                sim_distance_km REAL,
+                sim_travel_time_minutes REAL,
+                sim_avg_speed_kmh REAL,
+                sim_data_coverage REAL,
+                google_distance_km REAL,
+                google_travel_time_minutes REAL,
+                google_avg_speed_kmh REAL,
+                google_traffic_delay_seconds INTEGER,
+                time_error_percent REAL,
+                speed_error_percent REAL,
+                scenario_id TEXT,
+                notes TEXT
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_real_traffic_timestamp
@@ -297,6 +322,14 @@ class DigitalTwinDatabase:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_area_snapshots
             ON area_traffic_snapshots(area_id, snapshot_timestamp)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_route_estimations_timestamp
+            ON route_estimations(timestamp)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_route_estimations_type
+            ON route_estimations(estimation_type, timestamp)
         """)
 
         self.conn.commit()
@@ -347,16 +380,24 @@ class DigitalTwinDatabase:
     
     def store_real_traffic_data(
         self,
-        route_id: str,
-        travel_time_seconds: int,
-        distance_meters: int,
+        route_id: str = None,
+        travel_time_seconds: int = None,
+        distance_meters: int = None,
         traffic_delay_seconds: int = None,
         speed_kmh: float = None,
         data_source: str = "google_maps",
         raw_data: Dict = None,
-        timestamp: datetime = None
+        timestamp: datetime = None,
+        origin_lat: float = None,
+        origin_lon: float = None,
+        dest_lat: float = None,
+        dest_lon: float = None,
+        area_id: str = None
     ):
-        """Store real-world traffic measurement with optional custom timestamp"""
+        """Store real-world traffic measurement with optional custom timestamp
+
+        Can be used for both probe routes (with route_id) and network-based collection (with coordinates)
+        """
         cursor = self.conn.cursor()
 
         # Use provided timestamp or current time
@@ -369,12 +410,14 @@ class DigitalTwinDatabase:
 
         cursor.execute("""
             INSERT INTO real_traffic_data
-            (route_id, timestamp, travel_time_seconds, distance_meters,
-             traffic_delay_seconds, speed_kmh, data_source, raw_data)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (route_id, timestamp_str, travel_time_seconds,
+            (route_id, area_id, timestamp, travel_time_seconds, distance_meters,
+             traffic_delay_seconds, speed_kmh, data_source, raw_data,
+             origin_lat, origin_lon, dest_lat, dest_lon)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (route_id, area_id, timestamp_str, travel_time_seconds,
               distance_meters, traffic_delay_seconds, speed_kmh, data_source,
-              json.dumps(raw_data) if raw_data else None))
+              json.dumps(raw_data) if raw_data else None,
+              origin_lat, origin_lon, dest_lat, dest_lon))
         self.conn.commit()
     
     def get_real_traffic_data(
@@ -877,7 +920,113 @@ class DigitalTwinDatabase:
         stats['scenarios'] = cursor.fetchone()['count']
 
         return stats
-    
+
+    # ========== ROUTE ESTIMATIONS ==========
+
+    def store_route_estimation(
+        self,
+        origin_lat: float,
+        origin_lon: float,
+        dest_lat: float,
+        dest_lon: float,
+        estimation_type: str,
+        sim_distance_km: float = None,
+        sim_travel_time_minutes: float = None,
+        sim_avg_speed_kmh: float = None,
+        sim_data_coverage: float = None,
+        google_distance_km: float = None,
+        google_travel_time_minutes: float = None,
+        google_avg_speed_kmh: float = None,
+        google_traffic_delay_seconds: int = None,
+        time_error_percent: float = None,
+        speed_error_percent: float = None,
+        scenario_id: str = None,
+        notes: str = None
+    ) -> int:
+        """
+        Store a route estimation in the database
+
+        Args:
+            origin_lat, origin_lon: Route origin coordinates
+            dest_lat, dest_lon: Route destination coordinates
+            estimation_type: Type of estimation ('estimate', 'compare', 'targeted_simulation')
+            sim_*: Simulation results
+            google_*: Google Maps comparison data
+            time/speed_error_percent: Accuracy metrics
+            scenario_id: Associated scenario ID
+            notes: Additional notes
+
+        Returns:
+            ID of inserted record
+        """
+        cursor = self.conn.cursor()
+
+        cursor.execute("""
+            INSERT INTO route_estimations (
+                timestamp, origin_lat, origin_lon, dest_lat, dest_lon,
+                estimation_type, sim_distance_km, sim_travel_time_minutes,
+                sim_avg_speed_kmh, sim_data_coverage,
+                google_distance_km, google_travel_time_minutes,
+                google_avg_speed_kmh, google_traffic_delay_seconds,
+                time_error_percent, speed_error_percent,
+                scenario_id, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now().isoformat(),
+            origin_lat, origin_lon, dest_lat, dest_lon,
+            estimation_type, sim_distance_km, sim_travel_time_minutes,
+            sim_avg_speed_kmh, sim_data_coverage,
+            google_distance_km, google_travel_time_minutes,
+            google_avg_speed_kmh, google_traffic_delay_seconds,
+            time_error_percent, speed_error_percent,
+            scenario_id, notes
+        ))
+
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_route_estimations(
+        self,
+        start_time: str = None,
+        end_time: str = None,
+        estimation_type: str = None,
+        limit: int = 100
+    ) -> List[Dict]:
+        """
+        Get route estimations from database
+
+        Args:
+            start_time: Filter by start timestamp (ISO format)
+            end_time: Filter by end timestamp (ISO format)
+            estimation_type: Filter by type ('estimate', 'compare', 'targeted_simulation')
+            limit: Maximum number of records
+
+        Returns:
+            List of estimation records as dictionaries
+        """
+        cursor = self.conn.cursor()
+
+        query = "SELECT * FROM route_estimations WHERE 1=1"
+        params = []
+
+        if start_time:
+            query += " AND timestamp >= ?"
+            params.append(start_time)
+
+        if end_time:
+            query += " AND timestamp <= ?"
+            params.append(end_time)
+
+        if estimation_type:
+            query += " AND estimation_type = ?"
+            params.append(estimation_type)
+
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+
     def close(self):
         """Close database connection"""
         if self.conn:

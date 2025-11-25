@@ -115,8 +115,10 @@ class AdvancedVisualizer:
             csv_file = "data/logs/edge_state.csv"
             if os.path.exists(csv_file):
                 df = pd.read_csv(csv_file)
-                if 'mean_speed' in df.columns:
-                    speeds = df[df['mean_speed'] > 0]['mean_speed']
+                # Support both snake_case and camelCase column names
+                speed_col = 'meanSpeed' if 'meanSpeed' in df.columns else 'mean_speed'
+                if speed_col in df.columns:
+                    speeds = df[df[speed_col] > 0][speed_col]
                     if len(speeds) > 0:
                         speeds_kmh = speeds * 3.6
                         ax.hist(speeds_kmh, bins=30, color='#2196F3', alpha=0.7, edgecolor='black')
@@ -143,12 +145,15 @@ class AdvancedVisualizer:
             csv_file = "data/logs/edge_state.csv"
             if os.path.exists(csv_file):
                 df = pd.read_csv(csv_file)
-                if 'step' in df.columns and 'vehicle_count' in df.columns:
-                    flow = df.groupby('step')['vehicle_count'].mean().reset_index()
+                # Support both snake_case and camelCase column names
+                time_col = 'time' if 'time' in df.columns else 'step'
+                veh_col = 'numVeh' if 'numVeh' in df.columns else 'vehicle_count'
+                if time_col in df.columns and veh_col in df.columns:
+                    flow = df.groupby(time_col)[veh_col].mean().reset_index()
                     if len(flow) > 0:
-                        flow['time_min'] = flow['step'] / 60
-                        ax.plot(flow['time_min'], flow['vehicle_count'], color='#FF9800', linewidth=2)
-                        ax.fill_between(flow['time_min'], 0, flow['vehicle_count'], alpha=0.3, color='#FF9800')
+                        flow['time_min'] = flow[time_col] / 60
+                        ax.plot(flow['time_min'], flow[veh_col], color='#FF9800', linewidth=2)
+                        ax.fill_between(flow['time_min'], 0, flow[veh_col], alpha=0.3, color='#FF9800')
                         ax.set_xlabel('Time (minutes)')
                         ax.set_ylabel('Avg Vehicles per Edge')
                         ax.set_title('Traffic Flow Over Time')
@@ -195,8 +200,10 @@ class AdvancedVisualizer:
             csv_file = "data/logs/edge_state.csv"
             if os.path.exists(csv_file):
                 df = pd.read_csv(csv_file)
-                if 'mean_speed' in df.columns:
-                    speeds_kmh = df[df['mean_speed'] > 0]['mean_speed'] * 3.6
+                # Support both snake_case and camelCase column names
+                speed_col = 'meanSpeed' if 'meanSpeed' in df.columns else 'mean_speed'
+                if speed_col in df.columns:
+                    speeds_kmh = df[df[speed_col] > 0][speed_col] * 3.6
                     def categorize(speed):
                         if speed >= 40: return 'Free Flow'
                         elif speed >= 25: return 'Moderate'
@@ -233,8 +240,10 @@ class AdvancedVisualizer:
             csv_file = "data/logs/edge_state.csv"
             if os.path.exists(csv_file) and len(real_df) > 0:
                 sim_df = pd.read_csv(csv_file)
-                if 'mean_speed' in sim_df.columns:
-                    sim_speeds = (sim_df[sim_df['mean_speed'] > 0]['mean_speed'] * 3.6).sample(min(100, len(sim_df)))
+                # Support both snake_case and camelCase column names
+                speed_col = 'meanSpeed' if 'meanSpeed' in sim_df.columns else 'mean_speed'
+                if speed_col in sim_df.columns:
+                    sim_speeds = (sim_df[sim_df[speed_col] > 0][speed_col] * 3.6).sample(min(100, len(sim_df)))
                     real_speeds = real_df['speed_kmh'].sample(min(len(sim_speeds), len(real_df)))
 
                     # Match lengths
@@ -264,11 +273,14 @@ class AdvancedVisualizer:
             csv_file = "data/logs/edge_state.csv"
             if os.path.exists(csv_file):
                 df = pd.read_csv(csv_file)
-                if 'step' in df.columns and 'vehicle_count' in df.columns:
-                    vehicles = df.groupby('step')['vehicle_count'].sum().reset_index()
+                # Support both snake_case and camelCase column names
+                time_col = 'time' if 'time' in df.columns else 'step'
+                veh_col = 'numVeh' if 'numVeh' in df.columns else 'vehicle_count'
+                if time_col in df.columns and veh_col in df.columns:
+                    vehicles = df.groupby(time_col)[veh_col].sum().reset_index()
                     if len(vehicles) > 0:
-                        vehicles['time_min'] = vehicles['step'] / 60
-                        ax.plot(vehicles['time_min'], vehicles['vehicle_count'],
+                        vehicles['time_min'] = vehicles[time_col] / 60
+                        ax.plot(vehicles['time_min'], vehicles[veh_col],
                                color='#9C27B0', linewidth=2, marker='o', markersize=3)
                         ax.set_xlabel('Time (minutes)')
                         ax.set_ylabel('Total Vehicles')
