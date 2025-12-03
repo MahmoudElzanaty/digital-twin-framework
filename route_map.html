@@ -17,7 +17,7 @@
             <meta name="viewport" content="width=device-width,
                 initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
             <style>
-                #map_43b407a89e1c10dc305753e323b2919d {
+                #map_940bf07d7bbe1796f1a6be552fc74ad0 {
                     position: relative;
                     width: 100.0%;
                     height: 100.0%;
@@ -54,16 +54,16 @@
 <body>
     
     
-            <div class="folium-map" id="map_43b407a89e1c10dc305753e323b2919d" ></div>
+            <div class="folium-map" id="map_940bf07d7bbe1796f1a6be552fc74ad0" ></div>
         
 </body>
 <script>
     
     
-            var map_43b407a89e1c10dc305753e323b2919d = L.map(
-                "map_43b407a89e1c10dc305753e323b2919d",
+            var map_940bf07d7bbe1796f1a6be552fc74ad0 = L.map(
+                "map_940bf07d7bbe1796f1a6be552fc74ad0",
                 {
-                    center: [30.09137331694395, 31.644082194974324],
+                    center: [30.0404195, 31.4589435],
                     crs: L.CRS.EPSG3857,
                     ...{
   "zoom": 13,
@@ -73,13 +73,13 @@
 
                 }
             );
-            L.control.scale().addTo(map_43b407a89e1c10dc305753e323b2919d);
+            L.control.scale().addTo(map_940bf07d7bbe1796f1a6be552fc74ad0);
 
             
 
         
     
-            var tile_layer_dfc4c8f209e55eb97453b50540a90739 = L.tileLayer(
+            var tile_layer_98ae48d3b476eec3329a923cb4669919 = L.tileLayer(
                 "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
                 {
   "minZoom": 0,
@@ -96,47 +96,35 @@
             );
         
     
-            tile_layer_dfc4c8f209e55eb97453b50540a90739.addTo(map_43b407a89e1c10dc305753e323b2919d);
+            tile_layer_98ae48d3b476eec3329a923cb4669919.addTo(map_940bf07d7bbe1796f1a6be552fc74ad0);
         
     
-            var marker_d7822afbfe896d4bbd3dd303f3346fdd = L.marker(
-                [30.083625249542067, 31.614005956110166],
-                {
-}
-            ).addTo(map_43b407a89e1c10dc305753e323b2919d);
+            var rectangle_25a1bc28e2550b61b8154de196b8b204 = L.rectangle(
+                [[30.027801, 31.441827], [30.053038, 31.47606]],
+                {"bubblingMouseEvents": true, "color": "blue", "dashArray": null, "dashOffset": null, "fill": true, "fillColor": "lightblue", "fillOpacity": 0.2, "fillRule": "evenodd", "lineCap": "round", "lineJoin": "round", "noClip": false, "opacity": 1.0, "smoothFactor": 1.0, "stroke": true, "weight": 2}
+            ).addTo(map_940bf07d7bbe1796f1a6be552fc74ad0);
         
     
-            var icon_d1406da42420a4ff80c7810b56501601 = L.AwesomeMarkers.icon(
-                {
-  "markerColor": "green",
-  "iconColor": "white",
-  "icon": "play",
-  "prefix": "fa",
-  "extraClasses": "fa-rotate-0",
-}
-            );
-        
-    
-        var popup_2636a0ef5fa967d7922d97341f53cd3e = L.popup({
+        var popup_f4611a0c91fbd0e8fee63722723e086e = L.popup({
   "maxWidth": "100%",
 });
 
         
             
-                var html_d185b50d78d9576306e46d276874a4c4 = $(`<div id="html_d185b50d78d9576306e46d276874a4c4" style="width: 100.0%; height: 100.0%;">Origin</div>`)[0];
-                popup_2636a0ef5fa967d7922d97341f53cd3e.setContent(html_d185b50d78d9576306e46d276874a4c4);
+                var html_bb583daa7125ffa00fd9f806cb937cbf = $(`<div id="html_bb583daa7125ffa00fd9f806cb937cbf" style="width: 100.0%; height: 100.0%;">Network Boundary - Click inside this area</div>`)[0];
+                popup_f4611a0c91fbd0e8fee63722723e086e.setContent(html_bb583daa7125ffa00fd9f806cb937cbf);
             
         
 
-        marker_d7822afbfe896d4bbd3dd303f3346fdd.bindPopup(popup_2636a0ef5fa967d7922d97341f53cd3e)
+        rectangle_25a1bc28e2550b61b8154de196b8b204.bindPopup(popup_f4611a0c91fbd0e8fee63722723e086e)
         ;
 
         
     
     
-            marker_d7822afbfe896d4bbd3dd303f3346fdd.bindTooltip(
+            rectangle_25a1bc28e2550b61b8154de196b8b204.bindTooltip(
                 `<div>
-                     Start Point
+                     Simulated Network Area
                  </div>`,
                 {
   "sticky": true,
@@ -144,47 +132,44 @@
             );
         
     
-                marker_d7822afbfe896d4bbd3dd303f3346fdd.setIcon(icon_d1406da42420a4ff80c7810b56501601);
-            
-    
-            var marker_dda7b4fdf0612beeae6f7f1ba47a0c63 = L.marker(
-                [30.084284846215127, 31.662485168515914],
+            var marker_2818d1ceeaa76029a8eddaed2d8025c0 = L.marker(
+                [30.0404195, 31.4589435],
                 {
 }
-            ).addTo(map_43b407a89e1c10dc305753e323b2919d);
+            ).addTo(map_940bf07d7bbe1796f1a6be552fc74ad0);
         
     
-            var icon_1988b510d6990a2b4029344ad4d25b17 = L.AwesomeMarkers.icon(
+            var icon_61efe7852e740d0d00862f0e722f68e0 = L.AwesomeMarkers.icon(
                 {
-  "markerColor": "red",
+  "markerColor": "blue",
   "iconColor": "white",
-  "icon": "stop",
-  "prefix": "fa",
+  "icon": "info-sign",
+  "prefix": "glyphicon",
   "extraClasses": "fa-rotate-0",
 }
             );
         
     
-        var popup_236688d4ecf48c49a9ae09c90b21fbfd = L.popup({
+        var popup_0949396ee89e1419291bfbca2900ada2 = L.popup({
   "maxWidth": "100%",
 });
 
         
             
-                var html_b80edfd0fcd4e26595fcf09df73a336d = $(`<div id="html_b80edfd0fcd4e26595fcf09df73a336d" style="width: 100.0%; height: 100.0%;">Destination</div>`)[0];
-                popup_236688d4ecf48c49a9ae09c90b21fbfd.setContent(html_b80edfd0fcd4e26595fcf09df73a336d);
+                var html_6a0ba3438f749402b97830252c5011bb = $(`<div id="html_6a0ba3438f749402b97830252c5011bb" style="width: 100.0%; height: 100.0%;">Click anywhere INSIDE THE BLUE AREA to select origin and destination</div>`)[0];
+                popup_0949396ee89e1419291bfbca2900ada2.setContent(html_6a0ba3438f749402b97830252c5011bb);
             
         
 
-        marker_dda7b4fdf0612beeae6f7f1ba47a0c63.bindPopup(popup_236688d4ecf48c49a9ae09c90b21fbfd)
+        marker_2818d1ceeaa76029a8eddaed2d8025c0.bindPopup(popup_0949396ee89e1419291bfbca2900ada2)
         ;
 
         
     
     
-            marker_dda7b4fdf0612beeae6f7f1ba47a0c63.bindTooltip(
+            marker_2818d1ceeaa76029a8eddaed2d8025c0.bindTooltip(
                 `<div>
-                     End Point
+                     Click inside the blue area to start
                  </div>`,
                 {
   "sticky": true,
@@ -192,13 +177,7 @@
             );
         
     
-                marker_dda7b4fdf0612beeae6f7f1ba47a0c63.setIcon(icon_1988b510d6990a2b4029344ad4d25b17);
+                marker_2818d1ceeaa76029a8eddaed2d8025c0.setIcon(icon_61efe7852e740d0d00862f0e722f68e0);
             
-    
-            var poly_line_de647beed64eaadf886f05775484914c = L.polyline(
-                [[30.083625249542067, 31.614005956110166], [30.084284846215127, 31.662485168515914]],
-                {"bubblingMouseEvents": true, "color": "blue", "dashArray": null, "dashOffset": null, "fill": false, "fillColor": "blue", "fillOpacity": 0.2, "fillRule": "evenodd", "lineCap": "round", "lineJoin": "round", "noClip": false, "opacity": 0.7, "smoothFactor": 1.0, "stroke": true, "weight": 3}
-            ).addTo(map_43b407a89e1c10dc305753e323b2919d);
-        
 </script>
 </html>

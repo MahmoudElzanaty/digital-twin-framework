@@ -374,55 +374,84 @@ class AdvancedVisualizer:
             ax.set_title('Performance Metrics')
 
     def plot_route_estimation(self, route_data: Dict, save_path: Optional[str] = None) -> str:
-        """Create visualization for route estimation results"""
-        if save_path is None:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            save_path = os.path.join(self.output_dir, f"route_estimation_{timestamp}.png")
+        """Create visualization for route estimation results with robust error handling"""
+        try:
+            # Validate route_data
+            if not route_data or not isinstance(route_data, dict):
+                raise ValueError("Invalid route_data: must be a non-empty dictionary")
 
-        fig = plt.figure(figsize=(16, 10))
-        gs = GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
+            if save_path is None:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                save_path = os.path.join(self.output_dir, f"route_estimation_{timestamp}.png")
 
-        # 1. Route Overview
-        ax1 = fig.add_subplot(gs[0, :2])
-        self._plot_route_overview(ax1, route_data)
+            fig = plt.figure(figsize=(16, 10))
+            gs = GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
 
-        # 2. Speed Profile
-        ax2 = fig.add_subplot(gs[0, 2])
-        self._plot_speed_profile(ax2, route_data)
+            # 1. Route Overview
+            ax1 = fig.add_subplot(gs[0, :2])
+            self._plot_route_overview(ax1, route_data)
 
-        # 3. Edge Details
-        ax3 = fig.add_subplot(gs[1, 0])
-        self._plot_edge_details(ax3, route_data)
+            # 2. Speed Profile
+            ax2 = fig.add_subplot(gs[0, 2])
+            self._plot_speed_profile(ax2, route_data)
 
-        # 4. Comparison
-        ax4 = fig.add_subplot(gs[1, 1])
-        self._plot_estimation_comparison(ax4, route_data)
+            # 3. Edge Details
+            ax3 = fig.add_subplot(gs[1, 0])
+            self._plot_edge_details(ax3, route_data)
 
-        # 5. Data Coverage
-        ax5 = fig.add_subplot(gs[1, 2])
-        self._plot_data_coverage(ax5, route_data)
+            # 4. Comparison
+            ax4 = fig.add_subplot(gs[1, 1])
+            self._plot_estimation_comparison(ax4, route_data)
 
-        origin = route_data.get('origin', {})
-        dest = route_data.get('destination', {})
-        title = f"Route Estimation: ({origin.get('lat', 0):.4f}, {origin.get('lon', 0):.4f}) → ({dest.get('lat', 0):.4f}, {dest.get('lon', 0):.4f})"
-        fig.suptitle(title, fontsize=14, fontweight='bold', y=0.995)
+            # 5. Data Coverage
+            ax5 = fig.add_subplot(gs[1, 2])
+            self._plot_data_coverage(ax5, route_data)
 
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
+            # Safe title generation
+            origin = route_data.get('origin', {})
+            dest = route_data.get('destination', {})
+            origin_lat = origin.get('lat', 0) if isinstance(origin, dict) else 0
+            origin_lon = origin.get('lon', 0) if isinstance(origin, dict) else 0
+            dest_lat = dest.get('lat', 0) if isinstance(dest, dict) else 0
+            dest_lon = dest.get('lon', 0) if isinstance(dest, dict) else 0
 
-        print(f"[VISUALIZER] Saved route estimation to: {save_path}")
-        return save_path
+            title = f"Route Estimation: ({origin_lat:.4f}, {origin_lon:.4f}) → ({dest_lat:.4f}, {dest_lon:.4f})"
+            fig.suptitle(title, fontsize=14, fontweight='bold', y=0.995)
+
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close()
+
+            print(f"[VISUALIZER] ✅ Saved route estimation to: {save_path}")
+            return save_path
+
+        except Exception as e:
+            print(f"[VISUALIZER] ❌ Error creating route visualization: {e}")
+            import traceback
+            traceback.print_exc()
+            # Create a simple error plot
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.text(0.5, 0.5, f'Visualization Error:\n{str(e)}\n\nCheck console for details',
+                   ha='center', va='center', fontsize=12, color='red',
+                   bbox=dict(boxstyle='round', facecolor='#FFEBEE', edgecolor='red', linewidth=2))
+            ax.axis('off')
+            error_path = save_path or os.path.join(self.output_dir, f"route_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+            plt.savefig(error_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            return error_path
 
     def _plot_route_overview(self, ax, route_data: Dict):
-        """Plot route overview box"""
-        ax.axis('off')
-        distance_km = route_data.get('distance_km', 0)
-        travel_time_min = route_data.get('travel_time_minutes', 0)
-        avg_speed = route_data.get('average_speed_kmh', 0)
-        num_edges = route_data.get('num_edges', 0)
-        data_coverage = route_data.get('data_coverage', 0)
+        """Plot route overview box with robust error handling"""
+        try:
+            ax.axis('off')
 
-        summary = f"""
+            # Safe data extraction with type validation
+            distance_km = float(route_data.get('distance_km', 0)) if route_data.get('distance_km') is not None else 0
+            travel_time_min = float(route_data.get('travel_time_minutes', 0)) if route_data.get('travel_time_minutes') is not None else 0
+            avg_speed = float(route_data.get('average_speed_kmh', 0)) if route_data.get('average_speed_kmh') is not None else 0
+            num_edges = int(route_data.get('num_edges', 0)) if route_data.get('num_edges') is not None else 0
+            data_coverage = float(route_data.get('data_coverage', 0)) if route_data.get('data_coverage') is not None else 0
+
+            summary = f"""
 ╔══════════════════════════════════════════════════════╗
 ║                  ROUTE ESTIMATION SUMMARY             ║
 ╠══════════════════════════════════════════════════════╣
@@ -434,101 +463,207 @@ class AdvancedVisualizer:
 ╚══════════════════════════════════════════════════════╝
 """
 
-        if 'google_maps' in route_data:
-            gm = route_data['google_maps']
-            comp = route_data.get('comparison', {})
-            summary += f"""
+            # Safe Google Maps comparison
+            if 'google_maps' in route_data and isinstance(route_data['google_maps'], dict):
+                gm = route_data['google_maps']
+                comp = route_data.get('comparison', {})
+                if not isinstance(comp, dict):
+                    comp = {}
+
+                gm_time = float(gm.get('travel_time_minutes', 0)) if gm.get('travel_time_minutes') is not None else 0
+                gm_speed = float(gm.get('speed_kmh', 0)) if gm.get('speed_kmh') is not None else 0
+                time_error = float(comp.get('time_error_percent', 0)) if comp.get('time_error_percent') is not None else 0
+                speed_error = float(comp.get('speed_error_percent', 0)) if comp.get('speed_error_percent') is not None else 0
+
+                summary += f"""
 ╔══════════════════════════════════════════════════════╗
 ║              GOOGLE MAPS COMPARISON                   ║
 ╠══════════════════════════════════════════════════════╣
-║  Real Travel Time:     {gm['travel_time_minutes']:>8.1f} min             ║
-║  Real Speed:           {gm['speed_kmh']:>8.1f} km/h            ║
-║  Time Error:           {comp.get('time_error_percent', 0):>8.1f} %              ║
-║  Speed Error:          {comp.get('speed_error_percent', 0):>8.1f} %              ║
+║  Real Travel Time:     {gm_time:>8.1f} min             ║
+║  Real Speed:           {gm_speed:>8.1f} km/h            ║
+║  Time Error:           {time_error:>8.1f} %              ║
+║  Speed Error:          {speed_error:>8.1f} %              ║
 ╚══════════════════════════════════════════════════════╝
 """
 
-        ax.text(0.1, 0.5, summary, fontfamily='monospace', fontsize=11,
-               verticalalignment='center', bbox=dict(boxstyle='round',
-               facecolor='#E3F2FD', alpha=0.8, edgecolor='#2196F3', linewidth=2))
+            ax.text(0.1, 0.5, summary, fontfamily='monospace', fontsize=11,
+                   verticalalignment='center', bbox=dict(boxstyle='round',
+                   facecolor='#E3F2FD', alpha=0.8, edgecolor='#2196F3', linewidth=2))
+        except Exception as e:
+            print(f"[VISUALIZER] Error in route overview: {e}")
+            ax.text(0.5, 0.5, 'Route Overview\nError loading data',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=10, color='red')
 
     def _plot_speed_profile(self, ax, route_data: Dict):
-        """Plot speed profile"""
-        edges = route_data.get('edge_details', [])
-        if edges:
-            speeds = [e['speed_kmh'] for e in edges]
-            has_data = [e['has_sim_data'] for e in edges]
-            colors = ['#4CAF50' if h else '#FF9800' for h in has_data]
-            ax.bar(range(len(speeds)), speeds, color=colors, alpha=0.7, edgecolor='black')
-            avg = np.mean(speeds)
-            ax.axhline(avg, color='red', linestyle='--', linewidth=2, label=f'Avg: {avg:.1f} km/h')
-            ax.set_xlabel('Edge Index')
-            ax.set_ylabel('Speed (km/h)')
+        """Plot speed profile with robust error handling"""
+        try:
+            edges = route_data.get('edge_details', [])
+            if not isinstance(edges, list):
+                edges = []
+
+            if edges and len(edges) > 0:
+                # Safe extraction of speed data
+                speeds = []
+                has_data = []
+                for i, e in enumerate(edges):
+                    if not isinstance(e, dict):
+                        continue
+                    try:
+                        speed = float(e.get('speed_kmh', 0)) if e.get('speed_kmh') is not None else 0
+                        has_sim = bool(e.get('has_sim_data', False))
+                        speeds.append(speed)
+                        has_data.append(has_sim)
+                    except (TypeError, ValueError):
+                        speeds.append(0)
+                        has_data.append(False)
+
+                if speeds and len(speeds) > 0:
+                    colors = ['#4CAF50' if h else '#FF9800' for h in has_data]
+                    ax.bar(range(len(speeds)), speeds, color=colors, alpha=0.7, edgecolor='black')
+                    avg = np.mean(speeds)
+                    ax.axhline(avg, color='red', linestyle='--', linewidth=2, label=f'Avg: {avg:.1f} km/h')
+                    ax.set_xlabel('Edge Index')
+                    ax.set_ylabel('Speed (km/h)')
+                    ax.set_title('Speed Profile')
+                    ax.legend()
+                    ax.grid(True, axis='y', alpha=0.3)
+                    return
+
+            ax.text(0.5, 0.5, 'No edge data available', ha='center', va='center',
+                   transform=ax.transAxes, fontsize=10)
             ax.set_title('Speed Profile')
-            ax.legend()
-            ax.grid(True, axis='y', alpha=0.3)
-        else:
-            ax.text(0.5, 0.5, 'No edge data', ha='center', va='center', transform=ax.transAxes)
+        except Exception as e:
+            print(f"[VISUALIZER] Error in speed profile: {e}")
+            ax.text(0.5, 0.5, 'Speed Profile\nError loading data',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=10, color='red')
+            ax.set_title('Speed Profile')
 
     def _plot_edge_details(self, ax, route_data: Dict):
-        """Plot edge lengths"""
-        edges = route_data.get('edge_details', [])
-        if edges:
-            lengths = [e['length'] for e in edges]
-            ax.hist(lengths, bins=20, color='#00BCD4', alpha=0.7, edgecolor='black')
-            ax.axvline(np.mean(lengths), color='red', linestyle='--', linewidth=2,
-                      label=f'Mean: {np.mean(lengths):.1f} m')
-            ax.set_xlabel('Edge Length (m)')
-            ax.set_ylabel('Frequency')
+        """Plot edge lengths with robust error handling"""
+        try:
+            edges = route_data.get('edge_details', [])
+            if not isinstance(edges, list):
+                edges = []
+
+            if edges and len(edges) > 0:
+                # Safe extraction of length data
+                lengths = []
+                for e in edges:
+                    if not isinstance(e, dict):
+                        continue
+                    try:
+                        length = float(e.get('length', 0)) if e.get('length') is not None else 0
+                        if length > 0:  # Only include positive lengths
+                            lengths.append(length)
+                    except (TypeError, ValueError):
+                        continue
+
+                if lengths and len(lengths) > 0:
+                    bins = min(20, len(lengths))  # Adjust bins if too few data points
+                    ax.hist(lengths, bins=bins, color='#00BCD4', alpha=0.7, edgecolor='black')
+                    mean_length = np.mean(lengths)
+                    ax.axvline(mean_length, color='red', linestyle='--', linewidth=2,
+                              label=f'Mean: {mean_length:.1f} m')
+                    ax.set_xlabel('Edge Length (m)')
+                    ax.set_ylabel('Frequency')
+                    ax.set_title('Edge Length Distribution')
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+                    return
+
+            ax.text(0.5, 0.5, 'No edge data available', ha='center', va='center',
+                   transform=ax.transAxes, fontsize=10)
             ax.set_title('Edge Length Distribution')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-        else:
-            ax.text(0.5, 0.5, 'No edge data', ha='center', va='center', transform=ax.transAxes)
+        except Exception as e:
+            print(f"[VISUALIZER] Error in edge details: {e}")
+            ax.text(0.5, 0.5, 'Edge Details\nError loading data',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=10, color='red')
+            ax.set_title('Edge Length Distribution')
 
     def _plot_estimation_comparison(self, ax, route_data: Dict):
-        """Plot comparison if Google Maps data available"""
-        if 'google_maps' in route_data:
-            gm = route_data['google_maps']
-            sim_time = route_data.get('travel_time_minutes', 0)
-            real_time = gm['travel_time_minutes']
-            categories = ['Simulation', 'Google Maps']
-            times = [sim_time, real_time]
-            colors = ['#2196F3', '#4CAF50']
-            bars = ax.bar(categories, times, color=colors, alpha=0.7, edgecolor='black')
-            for bar, time in zip(bars, times):
-                height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height, f'{time:.1f} min',
-                       ha='center', va='bottom', fontweight='bold')
-            error_pct = route_data.get('comparison', {}).get('time_error_percent', 0)
-            ax.text(0.5, 0.95, f'Error: {error_pct:.1f}%', transform=ax.transAxes, ha='center',
-                   fontsize=12, fontweight='bold', bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
-            ax.set_ylabel('Travel Time (minutes)')
+        """Plot comparison if Google Maps data available with robust error handling"""
+        try:
+            if 'google_maps' in route_data and isinstance(route_data['google_maps'], dict):
+                gm = route_data['google_maps']
+
+                # Safe data extraction
+                sim_time = float(route_data.get('travel_time_minutes', 0)) if route_data.get('travel_time_minutes') is not None else 0
+                real_time = float(gm.get('travel_time_minutes', 0)) if gm.get('travel_time_minutes') is not None else 0
+
+                # Only plot if we have valid data
+                if sim_time > 0 or real_time > 0:
+                    categories = ['Simulation', 'Google Maps']
+                    times = [sim_time, real_time]
+                    colors = ['#2196F3', '#4CAF50']
+                    bars = ax.bar(categories, times, color=colors, alpha=0.7, edgecolor='black')
+
+                    for bar, time in zip(bars, times):
+                        height = bar.get_height()
+                        if height > 0:
+                            ax.text(bar.get_x() + bar.get_width()/2., height, f'{time:.1f} min',
+                                   ha='center', va='bottom', fontweight='bold')
+
+                    # Safe error calculation
+                    comp = route_data.get('comparison', {})
+                    if not isinstance(comp, dict):
+                        comp = {}
+                    error_pct = float(comp.get('time_error_percent', 0)) if comp.get('time_error_percent') is not None else 0
+
+                    ax.text(0.5, 0.95, f'Error: {error_pct:.1f}%', transform=ax.transAxes, ha='center',
+                           fontsize=12, fontweight='bold', bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
+                    ax.set_ylabel('Travel Time (minutes)')
+                    ax.set_title('Estimation Comparison')
+                    ax.grid(True, axis='y', alpha=0.3)
+                    return
+
+            ax.text(0.5, 0.5, 'No Google Maps\ncomparison data', ha='center', va='center',
+                   transform=ax.transAxes, fontsize=10)
             ax.set_title('Estimation Comparison')
-            ax.grid(True, axis='y', alpha=0.3)
-        else:
-            ax.text(0.5, 0.5, 'No Google Maps\ncomparison', ha='center', va='center', transform=ax.transAxes)
+        except Exception as e:
+            print(f"[VISUALIZER] Error in estimation comparison: {e}")
+            ax.text(0.5, 0.5, 'Comparison\nError loading data',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=10, color='red')
             ax.set_title('Estimation Comparison')
 
     def _plot_data_coverage(self, ax, route_data: Dict):
-        """Plot data coverage pie"""
-        with_data = route_data.get('edges_with_sim_data', 0)
-        total = route_data.get('num_edges', 1)
-        without_data = total - with_data
-        if total > 0:
-            sizes = [with_data, without_data]
-            labels = ['With Sim Data', 'Default Speed']
-            colors = ['#4CAF50', '#FF9800']
-            explode = (0.1, 0)
-            wedges, texts, autotexts = ax.pie(sizes, explode=explode, labels=labels,
-                                               autopct='%1.1f%%', colors=colors, startangle=90)
-            for autotext in autotexts:
-                autotext.set_color('white')
-                autotext.set_fontweight('bold')
-                autotext.set_fontsize(11)
-            ax.set_title(f'Data Coverage\n({with_data}/{total} edges)')
-        else:
-            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        """Plot data coverage pie with robust error handling"""
+        try:
+            # Safe data extraction
+            with_data = int(route_data.get('edges_with_sim_data', 0)) if route_data.get('edges_with_sim_data') is not None else 0
+            total = int(route_data.get('num_edges', 0)) if route_data.get('num_edges') is not None else 0
+
+            # Ensure valid values
+            if total < 0:
+                total = 0
+            if with_data < 0:
+                with_data = 0
+            if with_data > total:
+                with_data = total
+
+            without_data = total - with_data
+
+            if total > 0:
+                sizes = [with_data, without_data]
+                labels = ['With Sim Data', 'Default Speed']
+                colors = ['#4CAF50', '#FF9800']
+                explode = (0.1, 0)
+
+                wedges, texts, autotexts = ax.pie(sizes, explode=explode, labels=labels,
+                                                   autopct='%1.1f%%', colors=colors, startangle=90)
+                for autotext in autotexts:
+                    autotext.set_color('white')
+                    autotext.set_fontweight('bold')
+                    autotext.set_fontsize(11)
+                ax.set_title(f'Data Coverage\n({with_data}/{total} edges)')
+            else:
+                ax.text(0.5, 0.5, 'No edge data available', ha='center', va='center',
+                       transform=ax.transAxes, fontsize=10)
+                ax.set_title('Data Coverage')
+        except Exception as e:
+            print(f"[VISUALIZER] Error in data coverage: {e}")
+            ax.text(0.5, 0.5, 'Data Coverage\nError loading data',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=10, color='red')
+            ax.set_title('Data Coverage')
 
     def plot_comparison_timeline(self, scenario_ids: List[str], save_path: Optional[str] = None) -> str:
         """Create timeline comparison of multiple scenarios"""

@@ -1916,6 +1916,31 @@ class MainWindow(QWidget):
             "Useful when you have already collected typical traffic patterns."
         )
         self.use_historical_data_check.setChecked(False)
+        # Style checkbox to have blue checkmark (visible against white background)
+        self.use_historical_data_check.setStyleSheet("""
+            QCheckBox {
+                spacing: 8px;
+                font-size: 10pt;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #666;
+                border-radius: 3px;
+                background-color: white;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #2196F3;
+                border-color: #1976D2;
+                image: url(none);
+            }
+            QCheckBox::indicator:checked::after {
+                content: "✓";
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+            }
+        """)
         options_layout.addWidget(self.use_historical_data_check)
 
         # Validation time selection
