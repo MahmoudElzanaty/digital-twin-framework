@@ -14,7 +14,7 @@ pandas==2.1.4
 numpy==1.26.3
 
 # Machine Learning (for adaptive features)
-scikit-learn==1.4.0
+scikit-learn==1.5.0
 tensorflow==2.15.0
 # OR pytorch if you prefer: torch==2.1.2
 
